@@ -15,6 +15,11 @@ impl Field {
         Self { cursor: text.len(), text }
     }
 
+    /// Starts on `before` then `after`, with the cursor between them: where a completed word ends.
+    pub fn joined(before: &str, after: &str) -> Self {
+        Self { cursor: before.len(), text: format!("{before}{after}") }
+    }
+
     /// What is typed.
     pub fn text(&self) -> &str {
         &self.text
@@ -34,6 +39,14 @@ impl Field {
     pub fn split(&self) -> (&str, &str, &str) {
         let under = self.next().map_or("", |end| &self.text[self.cursor..end]);
         (&self.text[..self.cursor], under, &self.text[self.cursor + under.len()..])
+    }
+
+    /// What sits before the word under the cursor, the word, and the rest; whitespace ends a word,
+    /// so the word is empty when the cursor sits between two spaces.
+    pub fn word(&self) -> (&str, &str, &str) {
+        let start = self.text[..self.cursor].char_indices().rfind(|(_, c)| c.is_whitespace()).map_or(0, |(i, c)| i + c.len_utf8());
+        let end = self.text[self.cursor..].find(char::is_whitespace).map_or(self.text.len(), |i| self.cursor + i);
+        (&self.text[..start], &self.text[start..end], &self.text[end..])
     }
 
     /// Types `c` at the cursor.
@@ -366,5 +379,26 @@ mod tests {
         assert_eq!(shown(&field), "a|");
         field.take();
         assert_eq!(shown(&field), "|");
+    }
+
+    #[test]
+    fn the_word_spans_the_cursor_up_to_the_spaces_around_it() {
+        let mut field = Field::new("hi @nina there");
+        assert_eq!(field.word(), ("hi @nina ", "there", ""));
+        for _ in 0..8 {
+            field.left();
+        }
+        assert_eq!(shown(&field), "hi @ni|na there");
+        assert_eq!(field.word(), ("hi ", "@nina", " there"));
+        field.start();
+        assert_eq!(field.word(), ("", "hi", " @nina there"));
+        assert_eq!(Field::new("café ").word(), ("café ", "", ""));
+        assert_eq!(Field::new("a\u{3000}🚀").word(), ("a\u{3000}", "🚀", ""), "a wide space ends a word too");
+    }
+
+    #[test]
+    fn joined_puts_the_cursor_between_the_two_sides() {
+        assert_eq!(shown(&Field::joined("hi :tada: ", " there")), "hi :tada: | there");
+        assert_eq!(shown(&Field::joined("café", "")), "café|");
     }
 }
