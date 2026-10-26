@@ -7,6 +7,13 @@ description = "Terminal UI building blocks shared by the vmeyet TUIs: theme, inp
 license = "MIT"
 repository = "https://github.com/vmeyet/vtui"
 
+[dependencies]
+base64 = "0.22"
+crossterm = "0.29"
+libc = "0.2"
+ratatui = "0.30"
+tracing = { version = "0.1", default-features = false, features = ["std"] }
+
 [lints.rust]
 elided_lifetimes_in_paths = "warn"
 missing_debug_implementations = "warn"
