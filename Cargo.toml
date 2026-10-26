@@ -13,6 +13,10 @@ crossterm = "0.29"
 libc = "0.2"
 ratatui = "0.30"
 tracing = { version = "0.1", default-features = false, features = ["std"] }
+unicode-width = "0.2"
+
+[dev-dependencies]
+proptest = { version = "1.11", default-features = false, features = ["std"] }
 
 [lints.rust]
 elided_lifetimes_in_paths = "warn"
