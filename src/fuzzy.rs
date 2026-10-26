@@ -5,12 +5,15 @@ const WORD_START: i64 = 10;
 const CONSECUTIVE: i64 = 6;
 const GAP: i64 = 1;
 
-fn score(query: &str, candidate: &str) -> Option<i64> {
-    let query: Vec<char> = query.chars().flat_map(char::to_lowercase).collect();
+fn lowercase_chars(s: &str) -> Vec<char> {
+    s.chars().flat_map(char::to_lowercase).collect()
+}
+
+fn score(query: &[char], candidate: &str) -> Option<i64> {
     if query.is_empty() {
         return Some(0);
     }
-    let text: Vec<char> = candidate.chars().flat_map(char::to_lowercase).collect();
+    let text = lowercase_chars(candidate);
     let word_start = |i: usize| i == 0 || !text[i - 1].is_alphanumeric();
     // best[i]: best score with the current query char matched at text index i
     let mut best: Vec<Option<i64>> =
@@ -42,8 +45,10 @@ fn score(query: &str, candidate: &str) -> Option<i64> {
 }
 
 /// Candidates ordered best first, ties keeping the input order.
-pub fn rank<T>(query: &str, items: impl IntoIterator<Item = (String, T)>) -> Vec<(i64, T)> {
-    let mut scored: Vec<(i64, T)> = items.into_iter().filter_map(|(label, item)| score(query, &label).map(|s| (s, item))).collect();
+pub fn rank<L: AsRef<str>, T>(query: &str, items: impl IntoIterator<Item = (L, T)>) -> Vec<(i64, T)> {
+    let query = lowercase_chars(query);
+    let mut scored: Vec<(i64, T)> =
+        items.into_iter().filter_map(|(label, item)| score(&query, label.as_ref()).map(|s| (s, item))).collect();
     scored.sort_by_key(|(s, _)| std::cmp::Reverse(*s));
     scored
 }
@@ -67,7 +72,7 @@ fn edit_distance(a: &str, b: &str) -> usize {
 /// Suggestions for a mistyped word: fuzzy matches first, then anything within two edits.
 pub fn suggestions<'a>(query: &str, candidates: impl IntoIterator<Item = &'a str>, limit: usize) -> Vec<&'a str> {
     let candidates: Vec<&str> = candidates.into_iter().collect();
-    let mut out: Vec<&str> = rank(query, candidates.iter().map(|c| ((*c).to_owned(), *c))).into_iter().map(|(_, c)| c).collect();
+    let mut out: Vec<&str> = rank(query, candidates.iter().map(|c| (*c, *c))).into_iter().map(|(_, c)| c).collect();
     let mut close: Vec<(usize, &str)> = candidates
         .iter()
         .filter(|c| !out.contains(c))
@@ -80,8 +85,9 @@ pub fn suggestions<'a>(query: &str, candidates: impl IntoIterator<Item = &'a str
     out
 }
 
-/// The single obvious match, when one candidate clearly beats the rest.
-pub(crate) fn best<T>(query: &str, items: impl IntoIterator<Item = (String, T)>) -> Option<T> {
+/// The single obvious match, when one candidate clearly beats the rest: what a ghost completion
+/// or a jump to "the" match should pick, and nothing when the top two are too close to call.
+pub fn best<L: AsRef<str>, T>(query: &str, items: impl IntoIterator<Item = (L, T)>) -> Option<T> {
     let mut ranked = rank(query, items).into_iter();
     let (top, item) = ranked.next()?;
     let runner_up = ranked.next().map_or(i64::MIN, |(s, _)| s);
@@ -92,15 +98,19 @@ pub(crate) fn best<T>(query: &str, items: impl IntoIterator<Item = (String, T)>)
 mod tests {
     use super::*;
 
-    fn order(query: &str, items: &[&str]) -> Vec<String> {
-        rank(query, items.iter().map(|i| (i.to_string(), i.to_string()))).into_iter().map(|(_, i)| i).collect()
+    fn order<'a>(query: &str, items: &[&'a str]) -> Vec<&'a str> {
+        rank(query, items.iter().map(|i| (*i, *i))).into_iter().map(|(_, i)| i).collect()
+    }
+
+    fn score_of(query: &str, candidate: &str) -> Option<i64> {
+        score(&lowercase_chars(query), candidate)
     }
 
     #[test]
     fn subsequence_required() {
-        assert!(score("vvt", "#vivien-vault").is_some());
-        assert!(score("xyz", "#vivien-vault").is_none());
-        assert_eq!(score("", "anything"), Some(0));
+        assert!(score_of("vvt", "#vivien-vault").is_some());
+        assert!(score_of("xyz", "#vivien-vault").is_none());
+        assert_eq!(score_of("", "anything"), Some(0));
     }
 
     #[test]
@@ -131,5 +141,12 @@ mod tests {
         assert_eq!(best("rand", items()).as_deref(), Some("#random"));
         assert_eq!(best("gener", items()), None);
         assert_eq!(best("zzz", items()), None);
+    }
+
+    #[test]
+    fn borrowed_and_owned_labels_rank_the_same() {
+        let owned = rank("wid", ["acme/widgets".to_owned(), "acme/tools".to_owned()].map(|s| (s.clone(), s)));
+        let borrowed = rank("wid", ["acme/widgets", "acme/tools"].map(|s| (s, s.to_owned())));
+        assert_eq!(owned, borrowed);
     }
 }

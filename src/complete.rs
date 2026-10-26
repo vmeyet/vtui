@@ -1,4 +1,5 @@
-//! Completing the token being typed in the palette: a cycle through the candidates, and a ghost of the best one.
+//! Completing the token being typed in any input box, the palette's or an app's own:
+//! a cycle through the candidates, and a ghost of the best one.
 use crate::fuzzy;
 use crate::toward::Toward;
 
@@ -10,47 +11,55 @@ fn rank(token: &str, candidates: &[String]) -> Vec<String> {
     if token.is_empty() {
         return candidates.iter().take(MAX).cloned().collect();
     }
-    fuzzy::rank(token, candidates.iter().map(|c| (c.clone(), c.clone()))).into_iter().map(|(_, c)| c).take(MAX).collect()
+    fuzzy::rank(token, candidates.iter().map(|c| (c.as_str(), c))).into_iter().map(|(_, c)| c.clone()).take(MAX).collect()
 }
 
 /// The grey text a shell shows after the cursor: the rest of the best candidate for `token`,
 /// or nothing when the token is empty or matches nothing. A candidate `token` starts is preferred
 /// over a fuzzy match, so typing a name to its end never jumps somewhere else.
-pub(crate) fn ghost(token: &str, candidates: &[String]) -> Option<String> {
+pub fn ghost(token: &str, candidates: &[String]) -> Option<String> {
     if token.is_empty() {
         return None;
     }
     let lower = token.to_lowercase();
-    let by_prefix = candidates.iter().find(|c| c.to_lowercase().starts_with(&lower) && c.len() > token.len());
-    let best = by_prefix.cloned().or_else(|| fuzzy::best(token, candidates.iter().map(|c| (c.clone(), c.clone()))))?;
-    if best.to_lowercase().starts_with(&lower) { Some(best[token.len()..].to_owned()) } else { None }
+    let typed = token.chars().count();
+    let by_prefix = candidates.iter().find(|c| c.to_lowercase().starts_with(&lower) && c.chars().count() > typed);
+    let best = by_prefix.or_else(|| fuzzy::best(token, candidates.iter().map(|c| (c.as_str(), c))))?;
+    if !best.to_lowercase().starts_with(&lower) {
+        return None;
+    }
+    // Lowercasing can change byte lengths (İ is 2 bytes, its lowercase 3), so the typed part is skipped by characters.
+    let rest = best.char_indices().nth(typed).map_or(best.len(), |(i, _)| i);
+    Some(best[rest..].to_owned())
 }
 
 /// The candidates one token is being cycled through, until the text changes again.
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct Cycle {
+pub struct Cycle {
     options: Vec<String>,
     at: usize,
 }
 
 impl Cycle {
     /// Starts on the best candidate for `token`, or nothing when none matches.
-    pub(crate) fn new(token: &str, candidates: &[String]) -> Option<Self> {
+    pub fn new(token: &str, candidates: &[String]) -> Option<Self> {
         let options = rank(token, candidates);
         (!options.is_empty()).then_some(Self { options, at: 0 })
     }
 
-    pub(crate) fn advance(&mut self, toward: Toward) {
+    /// Moves to the next or previous candidate, wrapping around at either end.
+    pub fn advance(&mut self, toward: Toward) {
         self.at = toward.wrapped(self.at, 1, self.options.len());
     }
 
-    pub(crate) fn current(&self) -> &str {
+    /// The candidate in hand, the one the token is replaced with.
+    pub fn current(&self) -> &str {
         &self.options[self.at]
     }
 
     /// The row shown while cycling: the option in hand between brackets, then the next few.
     /// `label` is how each one reads on screen, which needs not be the value itself.
-    pub(crate) fn hint(&self, label: fn(&str) -> String) -> String {
+    pub fn hint(&self, label: fn(&str) -> String) -> String {
         let shown = self.options.iter().enumerate().skip(self.at).take(4);
         shown.map(|(i, o)| if i == self.at { format!("[{}]", label(o)) } else { label(o) }).collect::<Vec<_>>().join("  ")
     }
@@ -83,6 +92,13 @@ mod tests {
         assert_eq!(ghost("", &candidates()), None);
         assert_eq!(ghost("zzz", &candidates()), None);
         assert_eq!(ghost("rcar", &candidates()), None, "a fuzzy match the token does not start suggests nothing");
+    }
+
+    #[test]
+    fn the_ghost_survives_letters_whose_lowercase_changes_length() {
+        let people = vec!["@İlker".to_owned()];
+        assert_eq!(ghost("@i", &people).as_deref(), Some("lker"));
+        assert_eq!(ghost("@İ", &people).as_deref(), Some("lker"));
     }
 
     #[test]
