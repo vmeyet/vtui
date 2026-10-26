@@ -5,5 +5,7 @@ pub mod field;
 pub mod ground;
 mod log;
 pub mod motion;
+pub mod pane;
 pub mod screen;
 pub mod text;
+pub mod theme;
