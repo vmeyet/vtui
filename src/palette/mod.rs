@@ -35,7 +35,7 @@ pub fn verbs_for(input: &str, verbs: impl IntoIterator<Item = Verb>) -> Vec<Verb
     let ranked: Vec<Verb> = if typed.is_empty() {
         verbs.into_iter().collect()
     } else {
-        fuzzy::rank(typed, verbs.into_iter().map(|verb| (verb.word.to_owned(), verb))).into_iter().map(|(_, verb)| verb).collect()
+        fuzzy::rank(typed, verbs.into_iter().map(|verb| (verb.word, verb))).into_iter().map(|(_, verb)| verb).collect()
     };
     ranked.into_iter().take(MAX_SHOWN).collect()
 }
