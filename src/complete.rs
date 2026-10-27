@@ -39,17 +39,17 @@ impl Index {
         Self { names, head }
     }
 
-    /// The grey text a shell shows after the cursor: the rest of the shortest candidate `token` starts,
+    /// The shortest candidate `token` starts, as a shell shows it in grey after the cursor,
     /// or nothing when the token is empty or starts none longer than itself.
     /// A fuzzy match is never shown, so typing a name to its end never jumps somewhere else.
-    pub fn ghost(&self, token: &str) -> Option<String> {
+    pub fn ghost(&self, token: &str) -> Option<Ghost> {
         if token.is_empty() {
             return None;
         }
         let key = token.to_lowercase();
         let longer = self.names[self.started_by(&key)].iter().filter(|name| name.key.len() > key.len());
         let best = longer.min_by_key(|name| name.rank())?;
-        Some(after_typed(&best.text, token.chars().count()))
+        Some(Ghost { name: best.text.clone(), rest: after_typed(&best.text, token.chars().count()) })
     }
 
     /// Starts a cycle on the best of at most 50 candidates for `token`, or nothing when none matches.
@@ -64,7 +64,7 @@ impl Index {
         }
         let key = token.to_lowercase();
         let started = self.started_by(&key);
-        let mut ranked = first_by_key(self.names[started.clone()].iter().collect(), MAX, |name| name.rank());
+        let mut ranked = first_by_key(&self.names[started.clone()], MAX, |name| name.rank());
         if ranked.len() < MAX {
             ranked.extend(self.fuzzy_matches(token, started, MAX - ranked.len()));
         }
@@ -98,14 +98,19 @@ impl Name {
     }
 }
 
-/// The first `count` of `items` by `key`, in order, without sorting the rest.
-fn first_by_key<T, K: Ord>(mut items: Vec<T>, count: usize, key: impl Fn(&T) -> K) -> Vec<T> {
-    if items.len() > count {
-        items.select_nth_unstable_by_key(count - 1, &key);
-        items.truncate(count);
+/// The first `count` of `items` by `key`, in order, holding no more than `count` of them at a time.
+fn first_by_key<T, K: Ord>(items: impl IntoIterator<Item = T>, count: usize, key: impl Fn(&T) -> K) -> Vec<T> {
+    let mut first = Vec::with_capacity(count + 1);
+    for item in items {
+        let item_key = key(&item);
+        if first.len() == count && first.last().is_none_or(|last| key(last) <= item_key) {
+            continue;
+        }
+        let at = first.partition_point(|kept| key(kept) <= item_key);
+        first.insert(at, item);
+        first.truncate(count);
     }
-    items.sort_unstable_by_key(key);
-    items
+    first
 }
 
 /// What follows the first `typed` characters of `name`.
@@ -115,8 +120,17 @@ fn after_typed(name: &str, typed: usize) -> String {
     name[rest..].to_owned()
 }
 
+/// The candidate a token completes to, and what to show after the token for it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Ghost {
+    /// The candidate as given, in its own case, which the typed token may not share.
+    pub name: String,
+    /// What follows the typed token: the grey text.
+    pub rest: String,
+}
+
 /// [`Index::ghost`] for a short list, the index built on each call; a long list keeps its [`Index`].
-pub fn ghost<S: AsRef<str>>(token: &str, candidates: &[S]) -> Option<String> {
+pub fn ghost<S: AsRef<str>>(token: &str, candidates: &[S]) -> Option<Ghost> {
     Index::new(candidates.iter().map(AsRef::as_ref)).ghost(token)
 }
 
@@ -143,6 +157,11 @@ impl Cycle {
         &self.options[self.at]
     }
 
+    /// Every candidate of the cycle, best first, whichever is in hand.
+    pub fn options(&self) -> &[String] {
+        &self.options
+    }
+
     /// The row shown while cycling: the option in hand between brackets, then the next few.
     /// `label` is how each one reads on screen, which needs not be the value itself.
     pub fn hint(&self, label: impl Fn(&str) -> String) -> String {
@@ -167,9 +186,23 @@ mod tests {
         (0..count).map(|n| format!("{prefix}{n:02}")).collect()
     }
 
+    fn rest(ghost: Option<Ghost>) -> Option<String> {
+        ghost.map(|ghost| ghost.rest)
+    }
+
     #[test]
     fn the_names_a_token_starts_come_shortest_first_then_as_given() {
         assert_eq!(options("ro", &["rocket", "robe", "rock", "rod"]), ["rod", "robe", "rock", "rocket"]);
+    }
+
+    #[test]
+    fn a_long_run_of_names_a_token_starts_keeps_the_shortest_first_then_as_given() {
+        // Numbered down, so the order given is the reverse of the alphabet and only it breaks a tie on length.
+        let names: Vec<String> = (0..60).map(|n| format!("c{}{:02}", "x".repeat(n % 3), 59 - n)).collect();
+        let by_length = (3..=5).flat_map(|len| names.iter().filter(move |name| name.len() == len));
+        let expected: Vec<String> = by_length.take(MAX).cloned().collect();
+        assert_eq!(Index::new(names.clone()).cycle("c").expect("matches").options(), expected);
+        assert_eq!(expected[..2], ["c59", "c56"]);
     }
 
     #[test]
@@ -216,8 +249,20 @@ mod tests {
     #[test]
     fn the_ghost_completes_the_shortest_name_the_token_starts() {
         let index = Index::new(["rockets", "rocket", "rock"]);
-        assert_eq!(index.ghost("rock").as_deref(), Some("et"), "a name no longer than the token has nothing to show");
-        assert_eq!(index.ghost("ROCK").as_deref(), Some("et"), "case does not matter");
+        assert_eq!(rest(index.ghost("rock")).as_deref(), Some("et"), "a name no longer than the token has nothing to show");
+        assert_eq!(rest(index.ghost("ROCK")).as_deref(), Some("et"), "case does not matter");
+    }
+
+    #[test]
+    fn the_ghost_names_the_candidate_in_its_own_case() {
+        let expected = Ghost { name: "Orders".to_owned(), rest: "ers".to_owned() };
+        assert_eq!(ghost("ord", &["Orders"]), Some(expected));
+    }
+
+    #[test]
+    fn of_two_names_differing_only_in_case_the_ghost_names_the_first_given() {
+        assert_eq!(ghost("ord", &["Orders", "orders"]).map(|ghost| ghost.name).as_deref(), Some("Orders"));
+        assert_eq!(ghost("ord", &["orders", "Orders"]).map(|ghost| ghost.name).as_deref(), Some("orders"));
     }
 
     #[test]
@@ -230,8 +275,8 @@ mod tests {
     #[test]
     fn the_ghost_survives_letters_whose_lowercase_changes_length() {
         let people = vec!["@İlker".to_owned()];
-        assert_eq!(ghost("@i", &people).as_deref(), Some("lker"));
-        assert_eq!(ghost("@İ", &people).as_deref(), Some("lker"));
+        assert_eq!(rest(ghost("@i", &people)).as_deref(), Some("lker"));
+        assert_eq!(rest(ghost("@İ", &people)).as_deref(), Some("lker"));
     }
 
     #[test]
@@ -258,6 +303,13 @@ mod tests {
         assert_eq!(cycle.current(), "rock", "two matches, so it wraps");
         cycle.advance(Toward::Previous);
         assert_eq!(cycle.current(), "rocket");
+    }
+
+    #[test]
+    fn the_options_stay_best_first_whichever_is_in_hand() {
+        let mut cycle = Cycle::new("rock", &candidates()).expect("matches");
+        cycle.advance(Toward::Next);
+        assert_eq!(cycle.options(), ["rock", "rocket"]);
     }
 
     #[test]
