@@ -9,9 +9,25 @@ fn lowercase_chars(s: &str) -> Vec<char> {
     s.chars().flat_map(char::to_lowercase).collect()
 }
 
+/// Whether every query char comes in `candidate`, in order: the cheap check that spares most names the scoring.
+fn is_subsequence(query: &[char], candidate: &str) -> bool {
+    if candidate.is_ascii() {
+        comes_in(query, candidate.bytes().map(|b| char::from(b.to_ascii_lowercase())))
+    } else {
+        comes_in(query, candidate.chars().flat_map(char::to_lowercase))
+    }
+}
+
+fn comes_in(query: &[char], mut text: impl Iterator<Item = char>) -> bool {
+    query.iter().all(|wanted| text.any(|c| c == *wanted))
+}
+
 fn score(query: &[char], candidate: &str) -> Option<i64> {
     if query.is_empty() {
         return Some(0);
+    }
+    if !is_subsequence(query, candidate) {
+        return None;
     }
     let text = lowercase_chars(candidate);
     let word_start = |i: usize| i == 0 || !text[i - 1].is_alphanumeric();
@@ -111,6 +127,13 @@ mod tests {
         assert!(score_of("vvt", "#vivien-vault").is_some());
         assert!(score_of("xyz", "#vivien-vault").is_none());
         assert_eq!(score_of("", "anything"), Some(0));
+    }
+
+    #[test]
+    fn letters_outside_ascii_match_in_any_case() {
+        assert!(score_of("ilk", "@İlker").is_some());
+        assert!(score_of("ÉT", "#été").is_some());
+        assert!(score_of("été", "#ete").is_none());
     }
 
     #[test]
