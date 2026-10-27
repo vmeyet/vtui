@@ -17,7 +17,7 @@ If a move from an app would need vtui to know an app type, the piece is made gen
 |---|---|
 | `screen` | `Screen`: raw mode on the alternate screen, the mouse, focus changes and the kitty modifier report; `enter_without_mouse` leaves the mouse to the terminal so its text selection keeps working; `lend` hands the terminal to `$EDITOR` or another program and takes it back |
 | `ground` | `ground::ask`: the terminal's background colour through OSC 11, read against a deadline |
-| `theme` | `Theme`: the colour tokens every pane draws with, nine named palettes, `rgb` and `mix` for an app's own colours, `with_ground` for the default palette |
+| `theme` | `Theme`: the colour tokens every pane draws with, nine named palettes, `rgb` and `mix` for an app's own colours, `with_ground` for the default palette; `Syntax` gives each code `Token` its colour in every palette |
 | `pane` | `pane::framed`: the rounded frame of a pane or modal, brighter when it has the keys; `pane::fade` dims what is drawn behind a modal |
 | `text` | `truncate`, `truncate_middle`, `truncate_tabs`: text cut to a number of terminal columns |
 | `field` | `Field`: the input box, its text and cursor in one value, and the word under the cursor |
