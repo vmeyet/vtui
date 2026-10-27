@@ -1,18 +1,34 @@
 //! The input box: its text and where the cursor sits, in one value so the two cannot drift.
 //! The cursor is a byte offset kept on a character boundary, so an accent or an emoji never splits.
 
+use std::fmt;
+
 /// A line of text being typed, or several, with the cursor in it.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Default)]
 pub struct Field {
     text: String,
     cursor: usize,
     revision: u64,
+    secret: bool,
 }
 
-/// The revision is history, not content: it takes no part.
+/// The revision is history and the secret mark is how the field prints, not content: neither takes part.
 impl PartialEq for Field {
     fn eq(&self, other: &Self) -> bool {
         self.text == other.text && self.cursor == other.cursor
+    }
+}
+
+/// A secret field prints how many characters it holds, never what they are.
+impl fmt::Debug for Field {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut debug = f.debug_struct("Field");
+        if self.secret {
+            debug.field("text", &format_args!("<redacted, {} chars>", self.text.chars().count()));
+        } else {
+            debug.field("text", &self.text);
+        }
+        debug.field("cursor", &self.cursor).field("revision", &self.revision).finish()
     }
 }
 
@@ -20,12 +36,18 @@ impl Field {
     /// Starts on `text` with the cursor after its last character, where typing goes on.
     pub fn new(text: impl Into<String>) -> Self {
         let text = text.into();
-        Self { cursor: text.len(), text, revision: 0 }
+        Self { cursor: text.len(), text, revision: 0, secret: false }
+    }
+
+    /// Starts like [`Field::new`], but its `Debug` never prints the text, so personal data kept in it
+    /// stays out of logs. Only `Debug` hides it: [`Field::text`] still hands it over.
+    pub fn secret(text: impl Into<String>) -> Self {
+        Self { secret: true, ..Self::new(text) }
     }
 
     /// Starts on `before` then `after`, with the cursor between them: where a completed word ends.
     pub fn joined(before: &str, after: &str) -> Self {
-        Self { cursor: before.len(), text: format!("{before}{after}"), revision: 0 }
+        Self { cursor: before.len(), text: format!("{before}{after}"), revision: 0, secret: false }
     }
 
     /// What is typed.
@@ -573,5 +595,32 @@ mod tests {
         edited.insert('!');
         edited.backspace();
         assert_eq!(edited, Field::new("nina"));
+    }
+
+    #[test]
+    fn a_secret_field_prints_its_length_instead_of_its_text() {
+        let printed = format!("{:?}", Field::secret("nina@acme"));
+        assert!(!printed.contains("nina"), "{printed}");
+        assert!(printed.contains("<redacted, 9 chars>"), "{printed}");
+    }
+
+    #[test]
+    fn a_secret_field_stays_secret_through_edits_take_and_clone() {
+        let mut field = Field::secret("café");
+        field.insert('!');
+        field.paste("nina");
+        field.backspace();
+        field.delete_word();
+        field.insert_str("acme");
+        field.take();
+        field.insert_str("widgets");
+        let printed = format!("{:?}", field.clone());
+        assert!(!printed.contains("widgets"), "{printed}");
+        assert!(printed.contains("<redacted, 7 chars>"), "{printed}");
+    }
+
+    #[test]
+    fn a_plain_field_prints_its_text() {
+        assert!(format!("{:?}", Field::new("nina")).contains("\"nina\""));
     }
 }

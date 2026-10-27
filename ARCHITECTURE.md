@@ -20,7 +20,7 @@ If a move from an app would need vtui to know an app type, the piece is made gen
 | `theme` | `Theme`: the colour tokens every pane draws with, nine named palettes, `rgb` and `mix` for an app's own colours, `with_ground` for the default palette; `Syntax` gives each code `Token` its colour in every palette |
 | `pane` | `pane::framed`: the rounded frame of a pane or modal, brighter when it has the keys; `pane::fade` dims what is drawn behind a modal |
 | `text` | `truncate`, `truncate_middle`, `truncate_tabs`: text cut to a number of terminal columns; `truncate_line`: a styled line cut the same way, each span keeping its style |
-| `field` | `Field`: the input box, its text and cursor in one value, the word under the cursor, a paste cleaned and typed as one edit, and a `revision` that grows with every change to the text |
+| `field` | `Field`: the input box, its text and cursor in one value, the word under the cursor, a paste cleaned and typed as one edit, a `revision` that grows with every change to the text, and `Field::secret` whose `Debug` prints the length, never the text |
 | `fuzzy` | fzf-style subsequence ranking, the single obvious match, and suggestions for a mistyped word |
 | `toward` | `Toward`: which way a move goes through a list that wraps around |
 | `complete` | Tab completion for any input box: `Cycle` through the candidates and the `ghost` of the best one |
