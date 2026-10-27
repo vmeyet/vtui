@@ -1,7 +1,7 @@
 //! The palette popup: the prompt with its mode, then the things to pick or the commands that match what is typed.
 use super::{MAX_SHOWN, Mode, Palette, Verb};
 use crate::pane;
-use crate::text::truncate;
+use crate::text::{truncate, truncate_line};
 use crate::theme::Theme;
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -9,6 +9,12 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Paragraph};
 use unicode_width::UnicodeWidthStr;
+
+/// The columns between a pick's label and its detail.
+const GAP: &str = "  ";
+
+/// The columns a cut label keeps before the detail is cut too: one character and `…`.
+const LABEL_MIN: usize = 2;
 
 /// The frame of the popup and the lines that do not depend on its width.
 #[derive(Debug)]
@@ -28,10 +34,11 @@ pub struct Pick<'a> {
     pub icon: &'static str,
     /// The icon's colour.
     pub colour: Color,
-    /// What it is, cut to the room left by `detail`.
+    /// What it is, cut first when the row is too narrow.
     pub label: &'a str,
-    /// Faded text after the label, such as an author; may be empty.
-    pub detail: &'a str,
+    /// What goes after the label, such as an author from [`faded`] or coloured badges; may be empty.
+    /// It keeps its styles and is cut, from its end, only when it does not fit beside a one-column label.
+    pub detail: Line<'a>,
 }
 
 /// Draws the popup over `area`; `list` gets the columns a row has and returns the rows between prompt and footer.
@@ -73,6 +80,11 @@ pub fn prompt<M: Mode>(theme: &Theme, palette: &Palette<M>, sign: &str, completi
     Line::from(spans)
 }
 
+/// `text` as a [`Pick`]'s detail, faded, such as an author.
+pub fn faded<'a>(theme: &Theme, text: &'a str) -> Line<'a> {
+    Line::styled(text, Style::default().fg(theme.faded))
+}
+
 /// The rows to pick from, the highlighted one marked with the bar; `no match` when there are none.
 pub fn pick_lines(theme: &Theme, picks: &[Pick<'_>], selected: usize, room: usize) -> Vec<Line<'static>> {
     if picks.is_empty() {
@@ -82,15 +94,21 @@ pub fn pick_lines(theme: &Theme, picks: &[Pick<'_>], selected: usize, room: usiz
 }
 
 fn pick_line(theme: &Theme, pick: &Pick<'_>, selected: bool, room: usize) -> Line<'static> {
-    let detail = if pick.detail.is_empty() { String::new() } else { format!("  {}", pick.detail) };
-    let label = truncate(pick.label, room.saturating_sub(detail.width()));
+    let gap = if pick.detail.width() == 0 { 0 } else { GAP.width() };
+    let label_room = room.saturating_sub(gap + pick.detail.width()).max(pick.label.width().min(LABEL_MIN)).min(room);
+    let label = truncate(pick.label, label_room);
+    let detail = truncate_line(&pick.detail, room.saturating_sub(label.width() + gap));
     let text = if selected { Style::default().add_modifier(Modifier::BOLD) } else { Style::default() };
-    Line::from(vec![
+    let mut spans = vec![
         Span::styled(if selected { "▎" } else { " " }, Style::default().fg(theme.accent)),
         Span::styled(format!("{} ", pick.icon), Style::default().fg(pick.colour)),
         Span::styled(label, text),
-        Span::styled(detail, Style::default().fg(theme.faded)),
-    ])
+    ];
+    if detail.width() > 0 {
+        spans.push(Span::raw(GAP));
+        spans.extend(detail.spans.into_iter().map(|span| Span::styled(span.content, detail.style.patch(span.style))));
+    }
+    Line::from(spans)
 }
 
 /// The commands that match the first word typed, each with what it does; the highlighted one while the line
@@ -116,6 +134,30 @@ mod tests {
     use super::*;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+    use unicode_width::UnicodeWidthStr;
+
+    const LONG: &str = "nina wants to merge acme/widgets into main";
+
+    fn writes() -> Style {
+        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+    }
+
+    fn badges() -> Line<'static> {
+        Line::from(vec![Span::raw("via tunnel"), Span::raw(" · "), Span::styled("WRITES", writes())])
+    }
+
+    fn row(label: &str, detail: Line<'_>, room: usize) -> Line<'static> {
+        let pick = Pick { icon: "◆", colour: Color::Blue, label, detail };
+        pick_lines(&Theme::default(), &[pick], 1, room).remove(0)
+    }
+
+    fn text(line: &Line<'_>) -> String {
+        line.spans.iter().map(|span| span.content.as_ref()).collect()
+    }
+
+    fn after_icon(line: &Line<'_>) -> usize {
+        line.width() - " ◆ ".width()
+    }
 
     fn drawn(width: u16, height: u16) -> String {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("a test backend");
@@ -128,6 +170,50 @@ mod tests {
             .chunks(buffer.area.width as usize)
             .map(|row| row.iter().map(ratatui::buffer::Cell::symbol).collect::<String>() + "\n")
             .collect()
+    }
+
+    #[test]
+    fn a_long_label_is_cut_and_the_badges_stay_whole() {
+        let line = row(LONG, badges(), 30);
+        assert!(text(&line).ends_with("…  via tunnel · WRITES"));
+        assert_eq!(after_icon(&line), 30);
+    }
+
+    #[test]
+    fn the_badges_keep_their_styles() {
+        let line = row(LONG, badges(), 30);
+        assert!(line.spans.iter().any(|span| span.content == "WRITES" && span.style == writes()));
+    }
+
+    #[test]
+    fn a_detail_wider_than_the_row_is_cut_from_its_end() {
+        assert!(text(&row("nina", badges(), 12)).ends_with(" n…  via tun…"));
+    }
+
+    #[test]
+    fn an_empty_detail_gives_the_label_the_whole_row() {
+        let line = row(LONG, Line::default(), 10);
+        assert!(text(&line).ends_with(" nina want…"));
+        assert_eq!(after_icon(&line), 10);
+    }
+
+    #[test]
+    fn a_faded_detail_is_drawn_in_the_faded_colour() {
+        let theme = Theme::default();
+        let line = row("nina", faded(&theme, "acme/widgets"), 30);
+        assert!(line.spans.iter().any(|span| span.content == "acme/widgets" && span.style.fg == Some(theme.faded)));
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn a_row_never_takes_more_than_its_room(
+            label in "[a-z漢🦀 ]{0,30}",
+            words in proptest::collection::vec("[a-zé漢 ]{0,10}", 0..4),
+            room in 1..40usize,
+        ) {
+            let line = row(&label, Line::from(words.into_iter().map(Span::raw).collect::<Vec<_>>()), room);
+            proptest::prop_assert!(after_icon(&line) <= room);
+        }
     }
 
     #[test]

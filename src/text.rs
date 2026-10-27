@@ -1,4 +1,5 @@
-//! Text cut to a number of terminal columns, so a wide character or an emoji never crosses the edge.
+//! Text and styled lines cut to a number of terminal columns, so a wide character or an emoji never crosses the edge.
+use ratatui::text::{Line, Span};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 /// `text` cut to `width` columns, ending with `…` when it did not fit.
@@ -30,6 +31,35 @@ pub fn truncate_tabs(text: &str, tab: &str, width: usize) -> String {
     with_ellipsis(chars, width)
 }
 
+/// `line` cut to `width` columns from its end, each span keeping its style, the cut one ending with `…`.
+pub fn truncate_line(line: &Line<'_>, width: usize) -> Line<'static> {
+    let spans = if line.width() <= width {
+        line.spans.iter().map(|span| Span::styled(span.content.to_string(), span.style)).collect()
+    } else {
+        cut_spans(&line.spans, width)
+    };
+    Line { spans, style: line.style, alignment: line.alignment }
+}
+
+/// The first `spans` that fit in `width - 1` columns, the one that crosses the cut ending with `…`.
+fn cut_spans(spans: &[Span<'_>], width: usize) -> Vec<Span<'static>> {
+    if width == 0 {
+        return Vec::new();
+    }
+    let mut room = width - 1;
+    let mut kept = Vec::new();
+    for span in spans {
+        let text = fitting(span.content.chars(), room);
+        if text.width() < span.content.width() {
+            kept.push(Span::styled(format!("{text}…"), span.style));
+            break;
+        }
+        room -= text.width();
+        kept.push(Span::styled(text, span.style));
+    }
+    kept
+}
+
 /// The first `chars` that fit in `width - 1` columns, then `…`.
 fn with_ellipsis(chars: impl Iterator<Item = char>, width: usize) -> String {
     format!("{}…", fitting(chars, width.saturating_sub(1)))
@@ -49,6 +79,20 @@ fn fitting(chars: impl Iterator<Item = char>, room: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::style::{Color, Style};
+    use ratatui::text::Span;
+
+    fn badges() -> Line<'static> {
+        Line::from(vec![
+            Span::styled("nina", Style::default().fg(Color::Green)),
+            Span::raw(" · "),
+            Span::styled("acme/widgets", Style::default().fg(Color::Red)),
+        ])
+    }
+
+    fn spans(line: &Line<'_>) -> Vec<(String, Style)> {
+        line.spans.iter().map(|span| (span.content.to_string(), span.style)).collect()
+    }
 
     #[test]
     fn truncate_keeps_the_width_and_ends_with_an_ellipsis() {
@@ -66,7 +110,39 @@ mod tests {
         assert_eq!(truncate_middle("abcdef", 1), "…");
     }
 
+    #[test]
+    fn a_line_that_fits_is_kept_whole() {
+        assert_eq!(truncate_line(&badges(), 40), badges());
+    }
+
+    #[test]
+    fn a_cut_line_keeps_the_style_of_each_span_and_ends_with_an_ellipsis() {
+        let green = Style::default().fg(Color::Green);
+        let red = Style::default().fg(Color::Red);
+        assert_eq!(
+            spans(&truncate_line(&badges(), 10)),
+            [("nina".to_owned(), green), (" · ".to_owned(), Style::default()), ("ac…".to_owned(), red)]
+        );
+    }
+
+    #[test]
+    fn a_line_cut_to_no_column_is_empty() {
+        assert_eq!(truncate_line(&badges(), 0).width(), 0);
+    }
+
+    #[test]
+    fn a_cut_line_keeps_its_own_style() {
+        let line = Line::styled("nina reviewed acme/widgets", Style::default().fg(Color::Blue));
+        assert_eq!(truncate_line(&line, 6).style, line.style);
+    }
+
     proptest::proptest! {
+        #[test]
+        fn a_cut_line_never_takes_more_than_its_width(words in proptest::collection::vec("[a-zé漢🦀 ]{0,8}", 0..4), width in 0..24usize) {
+            let line = Line::from(words.into_iter().map(Span::raw).collect::<Vec<_>>());
+            proptest::prop_assert!(truncate_line(&line, width).width() <= width);
+        }
+
         #[test]
         fn a_cut_text_never_takes_more_than_its_width(text in "[a-zé漢🦀 ]{0,20}", width in 1..24usize) {
             proptest::prop_assert!(truncate(&text, width).width() <= width);
