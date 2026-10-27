@@ -8,7 +8,8 @@ use crossterm::event::{
     PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::terminal::{EnterAlternateScreen, enable_raw_mode};
-use ratatui::DefaultTerminal;
+use ratatui::backend::Backend;
+use ratatui::{DefaultTerminal, Terminal};
 use std::io::Write;
 
 /// Clicks, drags and the wheel, in the SGR encoding. Not crossterm's `EnableMouseCapture`: it also
@@ -133,9 +134,17 @@ impl Screen {
             report_modifiers();
         }
         self.taken.take();
-        terminal.clear().or_warn("clearing the terminal");
+        repaint_everything_on_next_draw(terminal).or_warn("resetting the screen for a full repaint");
         outcome
     }
+}
+
+/// Clears the screen and forgets the last frame, so the next draw paints every cell, at the terminal's current size.
+/// Not `Terminal::clear`: it first reads the cursor position on stdin, where the app's key reader can swallow the answer,
+/// and then fails before forgetting the frame, so the next draw paints only a diff on a blank screen.
+fn repaint_everything_on_next_draw<B: Backend>(terminal: &mut Terminal<B>) -> Result<(), B::Error> {
+    let size = terminal.size()?;
+    terminal.resize(size.into())
 }
 
 fn write(sequence: &str) {
@@ -155,6 +164,12 @@ fn stop_modifiers() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::backend::TestBackend;
+    use ratatui::widgets::Paragraph;
+
+    fn draw_nina(terminal: &mut Terminal<TestBackend>) {
+        terminal.draw(|frame| frame.render_widget(Paragraph::new("nina"), frame.area())).expect("drawing to the test backend");
+    }
 
     #[test]
     fn a_captured_mouse_is_asked_for_and_given_back() {
@@ -178,5 +193,17 @@ mod tests {
     fn giving_the_terminal_back_stops_pastes_as_one_event() {
         let taken = Taken { mouse: Mouse::Free, modifiers: false };
         assert!(taken.given_back().contains("\x1b[?2004l"));
+    }
+
+    #[test]
+    fn a_frame_drawn_after_the_reset_repaints_a_screen_wiped_behind_ratatui() {
+        let mut terminal = Terminal::new(TestBackend::new(6, 1)).expect("a test terminal");
+        draw_nina(&mut terminal);
+        terminal.backend_mut().clear().expect("wiping the test screen");
+
+        repaint_everything_on_next_draw(&mut terminal).expect("resetting the test terminal");
+        draw_nina(&mut terminal);
+
+        terminal.backend().assert_buffer_lines(["nina  "]);
     }
 }
