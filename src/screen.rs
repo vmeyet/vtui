@@ -20,25 +20,25 @@ pub struct Screen {
     taken: Taken,
 }
 
-/// Whether the app reads the mouse, or leaves it to the terminal so its own text selection keeps working.
+/// Whether the app captures the mouse, or leaves it free for the terminal so its own text selection keeps working.
 #[derive(Clone, Copy, Debug)]
 enum Mouse {
     Captured,
-    Left,
+    Free,
 }
 
 impl Mouse {
     fn on(self) -> &'static [u8] {
         match self {
             Self::Captured => MOUSE_ON,
-            Self::Left => b"",
+            Self::Free => b"",
         }
     }
 
     fn off(self) -> &'static [u8] {
         match self {
             Self::Captured => MOUSE_OFF,
-            Self::Left => b"",
+            Self::Free => b"",
         }
     }
 }
@@ -76,7 +76,7 @@ impl Screen {
     /// Takes the terminal like [`Screen::enter`] but leaves the mouse to it, for an app that reads no clicks:
     /// the terminal's own text selection keeps working.
     pub fn enter_without_mouse() -> (DefaultTerminal, Self) {
-        Self::take(Mouse::Left)
+        Self::take(Mouse::Free)
     }
 
     fn take(mouse: Mouse) -> (DefaultTerminal, Self) {
@@ -145,8 +145,8 @@ mod tests {
     }
 
     #[test]
-    fn a_mouse_left_to_the_terminal_sends_nothing_either_way() {
-        assert_eq!(Mouse::Left.on(), b"");
-        assert_eq!(Mouse::Left.off(), b"");
+    fn a_free_mouse_sends_nothing_either_way() {
+        assert_eq!(Mouse::Free.on(), b"");
+        assert_eq!(Mouse::Free.off(), b"");
     }
 }

@@ -7,30 +7,40 @@ use crate::toward::Toward;
 const MAX: usize = 50;
 
 /// The candidates for `token`, best first; an empty token offers the head of the list.
-fn rank(token: &str, candidates: &[String]) -> Vec<String> {
+fn rank<S: AsRef<str>>(token: &str, candidates: &[S]) -> Vec<String> {
+    let names = candidates.iter().map(AsRef::as_ref);
     if token.is_empty() {
-        return candidates.iter().take(MAX).cloned().collect();
+        return names.take(MAX).map(str::to_owned).collect();
     }
-    fuzzy::rank(token, candidates.iter().map(|c| (c.as_str(), c))).into_iter().map(|(_, c)| c.clone()).take(MAX).collect()
+    fuzzy::rank(token, names.map(|c| (c, c))).into_iter().map(|(_, c)| c.to_owned()).take(MAX).collect()
 }
 
 /// The grey text a shell shows after the cursor: the rest of the best candidate for `token`,
 /// or nothing when the token is empty or matches nothing. A candidate `token` starts is preferred
 /// over a fuzzy match, so typing a name to its end never jumps somewhere else.
-pub fn ghost(token: &str, candidates: &[String]) -> Option<String> {
+pub fn ghost<S: AsRef<str>>(token: &str, candidates: &[S]) -> Option<String> {
     if token.is_empty() {
         return None;
     }
-    let lower = token.to_lowercase();
+    let names: Vec<&str> = candidates.iter().map(AsRef::as_ref).collect();
+    let started = started_by(token, &names);
     let typed = token.chars().count();
-    let by_prefix = candidates.iter().find(|c| c.to_lowercase().starts_with(&lower) && c.chars().count() > typed);
-    let best = by_prefix.or_else(|| fuzzy::best(token, candidates.iter().map(|c| (c.as_str(), c))))?;
-    if !best.to_lowercase().starts_with(&lower) {
-        return None;
-    }
+    let by_prefix = names.iter().zip(&started).position(|(c, starts)| *starts && c.chars().count() > typed);
+    let best = by_prefix.or_else(|| fuzzy::best(token, names.iter().enumerate().map(|(i, c)| (*c, i)))).filter(|&i| started[i])?;
+    Some(after_typed(names[best], typed))
+}
+
+/// Whether `token` starts each name, case aside.
+fn started_by(token: &str, names: &[&str]) -> Vec<bool> {
+    let lower = token.to_lowercase();
+    names.iter().map(|c| c.to_lowercase().starts_with(&lower)).collect()
+}
+
+/// What follows the first `typed` characters of `name`.
+fn after_typed(name: &str, typed: usize) -> String {
     // Lowercasing can change byte lengths (İ is 2 bytes, its lowercase 3), so the typed part is skipped by characters.
-    let rest = best.char_indices().nth(typed).map_or(best.len(), |(i, _)| i);
-    Some(best[rest..].to_owned())
+    let rest = name.char_indices().nth(typed).map_or(name.len(), |(i, _)| i);
+    name[rest..].to_owned()
 }
 
 /// The candidates one token is being cycled through, until the text changes again.
@@ -42,7 +52,7 @@ pub struct Cycle {
 
 impl Cycle {
     /// Starts on the best candidate for `token`, or nothing when none matches.
-    pub fn new(token: &str, candidates: &[String]) -> Option<Self> {
+    pub fn new<S: AsRef<str>>(token: &str, candidates: &[S]) -> Option<Self> {
         let options = rank(token, candidates);
         (!options.is_empty()).then_some(Self { options, at: 0 })
     }
@@ -59,7 +69,7 @@ impl Cycle {
 
     /// The row shown while cycling: the option in hand between brackets, then the next few.
     /// `label` is how each one reads on screen, which needs not be the value itself.
-    pub fn hint(&self, label: fn(&str) -> String) -> String {
+    pub fn hint(&self, label: impl Fn(&str) -> String) -> String {
         let shown = self.options.iter().enumerate().skip(self.at).take(4);
         shown.map(|(i, o)| if i == self.at { format!("[{}]", label(o)) } else { label(o) }).collect::<Vec<_>>().join("  ")
     }
@@ -102,6 +112,13 @@ mod tests {
     }
 
     #[test]
+    fn borrowed_names_complete_like_owned_ones() {
+        let names = ["rocket", "rock", "racing_car", "tada"];
+        assert_eq!(ghost("rock", &names), ghost("rock", &candidates()));
+        assert_eq!(Cycle::new("rock", &names), Cycle::new("rock", &candidates()));
+    }
+
+    #[test]
     fn cycling_walks_the_candidates_both_ways_and_wraps() {
         let mut cycle = Cycle::new("rock", &candidates()).expect("matches");
         assert_eq!(cycle.current(), "rock");
@@ -119,5 +136,7 @@ mod tests {
         let cycle = Cycle::new("rock", &candidates()).expect("matches");
         assert_eq!(cycle.hint(str::to_owned), "[rock]  rocket");
         assert_eq!(cycle.hint(|o| format!("· {o}")), "[· rock]  · rocket");
+        let mark = "›";
+        assert_eq!(cycle.hint(|o| format!("{mark}{o}")), "[›rock]  ›rocket", "a label can borrow what is around it");
     }
 }
