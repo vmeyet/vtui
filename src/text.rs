@@ -1,5 +1,6 @@
-//! Text and styled lines cut to a number of terminal columns, so a wide character or an emoji never crosses the edge.
+//! Text and styled lines cut or wrapped to a number of terminal columns, so a wide character or an emoji never crosses the edge.
 use ratatui::text::{Line, Span};
+use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 /// `text` cut to `width` columns, ending with `…` when it did not fit.
@@ -38,6 +39,38 @@ pub fn truncate_line(line: &Line<'_>, width: usize) -> Line<'static> {
     } else {
         cut_spans(&line.spans, width)
     };
+    with_spans(line, spans)
+}
+
+/// `line` wrapped to `width` columns, so an app can count the rows it takes and draw those same rows.
+///
+/// It breaks between characters (grapheme clusters), not words, so an accent or an emoji sequence stays whole.
+/// A character wider than `width` takes a row alone, and a `width` of 0 wraps like 1.
+/// Each span keeps its style, pieces of one style on a row are merged, and each row keeps the line's own style.
+pub fn wrap_line(line: &Line<'_>, width: usize) -> Vec<Line<'static>> {
+    let width = width.max(1);
+    let characters = line.spans.iter().flat_map(|span| span.content.graphemes(true).map(|character| (character, span.style)));
+    let mut rows = Vec::new();
+    let mut row: Vec<Span<'static>> = Vec::new();
+    let mut used = 0;
+    for (character, style) in characters {
+        let taken = character.width();
+        if used + taken > width && used > 0 {
+            rows.push(std::mem::take(&mut row));
+            used = 0;
+        }
+        used += taken;
+        match row.last_mut() {
+            Some(last) if last.style == style => last.content.to_mut().push_str(character),
+            _ => row.push(Span::styled(character.to_owned(), style)),
+        }
+    }
+    rows.push(row);
+    rows.into_iter().map(|spans| with_spans(line, spans)).collect()
+}
+
+/// `spans` laid out as `line` is: its own style and alignment.
+fn with_spans(line: &Line<'_>, spans: Vec<Span<'static>>) -> Line<'static> {
     Line { spans, style: line.style, alignment: line.alignment }
 }
 
@@ -79,6 +112,7 @@ fn fitting(chars: impl Iterator<Item = char>, room: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::strategy::Strategy;
     use ratatui::style::{Color, Style};
     use ratatui::text::Span;
 
@@ -136,7 +170,85 @@ mod tests {
         assert_eq!(truncate_line(&line, 6).style, line.style);
     }
 
+    fn rows(lines: &[Line<'_>]) -> Vec<String> {
+        lines.iter().map(ToString::to_string).collect()
+    }
+
+    #[test]
+    fn a_line_that_fits_wraps_to_itself() {
+        assert_eq!(wrap_line(&badges(), 40), [badges()]);
+    }
+
+    #[test]
+    fn a_wrapped_line_keeps_the_style_of_each_span() {
+        let green = Style::default().fg(Color::Green);
+        let red = Style::default().fg(Color::Red);
+        let wrapped = wrap_line(&badges(), 6);
+        assert_eq!(rows(&wrapped), ["nina ·", " acme/", "widget", "s"]);
+        assert_eq!(spans(&wrapped[0]), [("nina".to_owned(), green), (" ·".to_owned(), Style::default())]);
+        assert_eq!(spans(&wrapped[1]), [(" ".to_owned(), Style::default()), ("acme/".to_owned(), red)]);
+    }
+
+    #[test]
+    fn spans_of_one_style_on_one_row_are_merged() {
+        let line = Line::from(vec![Span::raw("ni"), Span::raw("na"), Span::raw(" reviewed")]);
+        assert_eq!(spans(&wrap_line(&line, 6)[0]), [("nina r".to_owned(), Style::default())]);
+    }
+
+    #[test]
+    fn a_wide_character_that_would_cross_the_edge_starts_the_next_row() {
+        assert_eq!(rows(&wrap_line(&Line::raw("a漢漢"), 4)), ["a漢", "漢"]);
+    }
+
+    #[test]
+    fn a_letter_keeps_its_combining_accent() {
+        assert_eq!(rows(&wrap_line(&Line::raw("nine\u{301}"), 3)), ["nin", "e\u{301}"]);
+    }
+
+    #[test]
+    fn an_emoji_sequence_or_a_flag_is_never_split() {
+        assert_eq!(rows(&wrap_line(&Line::raw("a👩\u{200d}💻🇫🇷"), 2)), ["a", "👩\u{200d}💻", "🇫🇷"]);
+    }
+
+    #[test]
+    fn a_character_wider_than_the_width_takes_a_row_alone() {
+        assert_eq!(rows(&wrap_line(&Line::raw("a漢b"), 1)), ["a", "漢", "b"]);
+    }
+
+    #[test]
+    fn a_width_of_zero_wraps_like_a_width_of_one() {
+        assert_eq!(wrap_line(&badges(), 0), wrap_line(&badges(), 1));
+    }
+
+    #[test]
+    fn an_empty_line_wraps_to_one_empty_row() {
+        assert_eq!(rows(&wrap_line(&Line::default(), 10)), [""]);
+    }
+
+    #[test]
+    fn each_wrapped_row_keeps_the_style_of_the_line() {
+        let line = Line::styled("nina reviewed acme/widgets", Style::default().fg(Color::Blue));
+        assert!(wrap_line(&line, 6).iter().all(|row| row.style == line.style));
+    }
+
+    fn lines_of_clusters() -> impl Strategy<Value = Line<'static>> {
+        proptest::collection::vec("(a|é|e\u{301}|漢|🦀|👩\u{200d}💻|🇫🇷| ){0,8}", 0..4)
+            .prop_map(|words| Line::from(words.into_iter().map(Span::raw).collect::<Vec<_>>()))
+    }
+
     proptest::proptest! {
+        #[test]
+        fn a_wrapped_row_never_takes_more_than_its_width_unless_one_character_does(line in lines_of_clusters(), width in 1..8usize) {
+            for row in wrap_line(&line, width) {
+                proptest::prop_assert!(row.width() <= width || row.to_string().graphemes(true).count() == 1);
+            }
+        }
+
+        #[test]
+        fn wrapped_rows_read_back_as_the_line(line in lines_of_clusters(), width in 0..8usize) {
+            proptest::prop_assert_eq!(rows(&wrap_line(&line, width)).concat(), line.to_string());
+        }
+
         #[test]
         fn a_cut_line_never_takes_more_than_its_width(words in proptest::collection::vec("[a-zé漢🦀 ]{0,8}", 0..4), width in 0..24usize) {
             let line = Line::from(words.into_iter().map(Span::raw).collect::<Vec<_>>());
