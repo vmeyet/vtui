@@ -40,6 +40,81 @@ pub struct Theme {
     pub danger: Color,
     /// Author names, picked by a hash of the name.
     pub users: [Color; 6],
+    /// Code colours, from the palette's own upstream scheme.
+    pub syntax: Syntax,
+}
+
+/// What a piece of code is, as far as colour goes; [`Syntax`] gives every token a colour.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Token {
+    /// A word of the language itself: `fn`, `if`, `return`.
+    Keyword,
+    /// A string or character literal.
+    String,
+    /// A comment, doc comments included.
+    Comment,
+    /// A number literal.
+    Number,
+    /// The name of a type.
+    Type,
+    /// The name of a function or method, where it is defined or called.
+    Function,
+    /// A constant, a boolean or a built-in value such as `None`.
+    Constant,
+    /// Brackets, delimiters and operators.
+    Punctuation,
+}
+
+/// One colour per [`Token`]: what a keyword, a string or a comment looks like in this palette.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Syntax {
+    /// [`Token::Keyword`].
+    pub keyword: Color,
+    /// [`Token::String`].
+    pub string: Color,
+    /// [`Token::Comment`].
+    pub comment: Color,
+    /// [`Token::Number`].
+    pub number: Color,
+    /// [`Token::Type`]; named `kind` because `type` is a Rust keyword.
+    pub kind: Color,
+    /// [`Token::Function`].
+    pub function: Color,
+    /// [`Token::Constant`].
+    pub constant: Color,
+    /// [`Token::Punctuation`], in the palette's muted tone.
+    pub punctuation: Color,
+}
+
+impl Syntax {
+    /// The colour `token` is drawn in.
+    pub fn colour(&self, token: Token) -> Color {
+        match token {
+            Token::Keyword => self.keyword,
+            Token::String => self.string,
+            Token::Comment => self.comment,
+            Token::Number => self.number,
+            Token::Type => self.kind,
+            Token::Function => self.function,
+            Token::Constant => self.constant,
+            Token::Punctuation => self.punctuation,
+        }
+    }
+}
+
+/// A palette's code colours from hex values, in [`Syntax`] field order: keyword, string, comment,
+/// number, type, function, constant, punctuation.
+const fn code([keyword, string, comment, number, kind, function, constant, punctuation]: [u32; 8]) -> Syntax {
+    Syntax {
+        keyword: rgb(keyword),
+        string: rgb(string),
+        comment: rgb(comment),
+        number: rgb(number),
+        kind: rgb(kind),
+        function: rgb(function),
+        constant: rgb(constant),
+        punctuation: rgb(punctuation),
+    }
 }
 
 /// The colour `0xRRGGBB`.
@@ -128,6 +203,16 @@ const DEFAULT: Theme = Theme {
     warn: Color::Yellow,
     danger: Color::Red,
     users: [Color::Cyan, Color::Green, Color::Yellow, Color::Magenta, Color::Blue, Color::LightRed],
+    syntax: Syntax {
+        keyword: Color::Magenta,
+        string: Color::Green,
+        comment: Color::Indexed(244),
+        number: Color::Yellow,
+        kind: Color::Cyan,
+        function: Color::Blue,
+        constant: Color::Yellow,
+        punctuation: Color::Indexed(246),
+    },
 };
 
 const DRACULA: Theme = Theme {
@@ -147,6 +232,7 @@ const DRACULA: Theme = Theme {
     warn: rgb(0xffb86c),
     danger: rgb(0xff5555),
     users: [rgb(0x8be9fd), rgb(0x50fa7b), rgb(0xf1fa8c), rgb(0xff79c6), rgb(0xbd93f9), rgb(0xffb86c)],
+    syntax: code([0xff79c6, 0xf1fa8c, 0x6272a4, 0xbd93f9, 0x8be9fd, 0x50fa7b, 0xbd93f9, 0x9098bd]),
 };
 
 const CATPPUCCIN: Theme = Theme {
@@ -166,6 +252,7 @@ const CATPPUCCIN: Theme = Theme {
     warn: rgb(0xfab387),
     danger: rgb(0xf38ba8),
     users: [rgb(0x89dceb), rgb(0xa6e3a1), rgb(0xf9e2af), rgb(0xf5c2e7), rgb(0x89b4fa), rgb(0xf38ba8)],
+    syntax: code([0xcba6f7, 0xa6e3a1, 0x9399b2, 0xfab387, 0xf9e2af, 0x89b4fa, 0xfab387, 0x9399b2]),
 };
 
 const CATPPUCCIN_LATTE: Theme = Theme {
@@ -185,6 +272,7 @@ const CATPPUCCIN_LATTE: Theme = Theme {
     warn: rgb(0xfe640b),
     danger: rgb(0xd20f39),
     users: [rgb(0x04a5e5), rgb(0x40a02b), rgb(0xdf8e1d), rgb(0xea76cb), rgb(0x1e66f5), rgb(0xd20f39)],
+    syntax: code([0x8839ef, 0x40a02b, 0x7c7f93, 0xfe640b, 0xdf8e1d, 0x1e66f5, 0xfe640b, 0x7c7f93]),
 };
 
 const ROSEPINE: Theme = Theme {
@@ -204,6 +292,7 @@ const ROSEPINE: Theme = Theme {
     warn: rgb(0xf6c177),
     danger: rgb(0xeb6f92),
     users: [rgb(0x9ccfd8), rgb(0x31748f), rgb(0xf6c177), rgb(0xeb6f92), rgb(0xc4a7e7), rgb(0xebbcba)],
+    syntax: code([0x31748f, 0xf6c177, 0x6e6a86, 0xc4a7e7, 0x9ccfd8, 0xebbcba, 0xc4a7e7, 0x908caa]),
 };
 
 const ROSEPINE_DAWN: Theme = Theme {
@@ -223,6 +312,7 @@ const ROSEPINE_DAWN: Theme = Theme {
     warn: rgb(0xea9d34),
     danger: rgb(0xb4637a),
     users: [rgb(0x56949f), rgb(0x286983), rgb(0xea9d34), rgb(0xb4637a), rgb(0x907aa9), rgb(0xd7827e)],
+    syntax: code([0x286983, 0xea9d34, 0x9893a5, 0x907aa9, 0x56949f, 0xd7827e, 0x907aa9, 0x797593]),
 };
 
 const NORD: Theme = Theme {
@@ -242,6 +332,7 @@ const NORD: Theme = Theme {
     warn: rgb(0xd08770),
     danger: rgb(0xbf616a),
     users: [rgb(0x88c0d0), rgb(0xa3be8c), rgb(0xebcb8b), rgb(0xb48ead), rgb(0x81a1c1), rgb(0xbf616a)],
+    syntax: code([0x81a1c1, 0xa3be8c, 0x616e88, 0xb48ead, 0x8fbcbb, 0x88c0d0, 0xb48ead, 0x81a1c1]),
 };
 
 const TOKYONIGHT: Theme = Theme {
@@ -261,6 +352,7 @@ const TOKYONIGHT: Theme = Theme {
     warn: rgb(0xff9e64),
     danger: rgb(0xf7768e),
     users: [rgb(0x7dcfff), rgb(0x9ece6a), rgb(0xe0af68), rgb(0xbb9af7), rgb(0x7aa2f7), rgb(0xf7768e)],
+    syntax: code([0xbb9af7, 0x9ece6a, 0x565f89, 0xff9e64, 0x2ac3de, 0x7aa2f7, 0xff9e64, 0x89ddff]),
 };
 
 const MONOKAI: Theme = Theme {
@@ -280,6 +372,7 @@ const MONOKAI: Theme = Theme {
     warn: rgb(0xfd971f),
     danger: rgb(0xf92672),
     users: [rgb(0x66d9ef), rgb(0xa6e22e), rgb(0xe6db74), rgb(0xf92672), rgb(0xae81ff), rgb(0xfd971f)],
+    syntax: code([0xf92672, 0xe6db74, 0x75715e, 0xae81ff, 0x66d9ef, 0xa6e22e, 0xae81ff, 0xa59f85]),
 };
 
 #[cfg(test)]
@@ -341,5 +434,57 @@ mod tests {
         let distinct: std::collections::HashSet<_> =
             ["a", "b", "c", "d", "e", "f", "g", "h"].iter().map(|n| format!("{:?}", theme.user(n))).collect();
         assert!(distinct.len() > 1);
+    }
+
+    #[test]
+    fn colour_returns_the_field_of_each_token() {
+        let syntax = Syntax {
+            keyword: Color::Indexed(1),
+            string: Color::Indexed(2),
+            comment: Color::Indexed(3),
+            number: Color::Indexed(4),
+            kind: Color::Indexed(5),
+            function: Color::Indexed(6),
+            constant: Color::Indexed(7),
+            punctuation: Color::Indexed(8),
+        };
+        let tokens = [
+            Token::Keyword,
+            Token::String,
+            Token::Comment,
+            Token::Number,
+            Token::Type,
+            Token::Function,
+            Token::Constant,
+            Token::Punctuation,
+        ];
+        let colours: Vec<Color> = tokens.into_iter().map(|token| syntax.colour(token)).collect();
+        assert_eq!(colours, (1..=8).map(Color::Indexed).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn every_palette_draws_code_in_colours_that_differ_from_its_ground() {
+        for name in Theme::NAMES {
+            let theme = Theme::named(name).unwrap();
+            let s = theme.syntax;
+            for colour in [s.keyword, s.string, s.comment, s.number, s.kind, s.function, s.constant, s.punctuation] {
+                assert_ne!(colour, theme.base, "{name}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_default_palette_colours_code_with_the_terminal_ansi_colours() {
+        let expected = Syntax {
+            keyword: Color::Magenta,
+            string: Color::Green,
+            comment: Color::Indexed(244),
+            number: Color::Yellow,
+            kind: Color::Cyan,
+            function: Color::Blue,
+            constant: Color::Yellow,
+            punctuation: Color::Indexed(246),
+        };
+        assert_eq!(Theme::default().syntax, expected);
     }
 }
