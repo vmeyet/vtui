@@ -35,14 +35,17 @@ pub struct Pick<'a> {
 }
 
 /// Draws the popup over `area`; `list` gets the columns a row has and returns the rows between prompt and footer.
+/// On a short terminal the list loses its last rows; the prompt and the footer always show.
 pub fn draw(f: &mut Frame<'_>, theme: &Theme, area: Rect, popup: Popup<'_>, list: impl FnOnce(usize) -> Vec<Line<'static>>) {
     let width = (area.width * 3 / 5).clamp(40.min(area.width), area.width);
-    let height = (MAX_SHOWN as u16 + 4).min(area.height);
+    let height = (MAX_SHOWN as u16 + 5).min(area.height);
     let at = Rect { x: area.x + (area.width - width) / 2, y: area.y + area.height.saturating_sub(height) / 3, width, height };
     let block = pane::framed(theme, popup.title, true);
-    let room = block.inner(at).width.saturating_sub(4) as usize;
+    let inner = block.inner(at);
+    let room = inner.width.saturating_sub(4) as usize;
+    let rows = inner.height.saturating_sub(3) as usize;
     let mut lines = vec![popup.prompt, Line::default()];
-    lines.extend(list(room));
+    lines.extend(list(room).into_iter().take(rows));
     lines.push(Line::from(Span::styled(popup.footer.to_owned(), Style::default().fg(theme.faded))));
     f.render_widget(Clear, at);
     f.render_widget(Paragraph::new(lines).block(block).style(Style::default().bg(theme.surface)), at);
@@ -106,4 +109,40 @@ pub fn verb_lines<M: Mode>(theme: &Theme, palette: &Palette<M>, verbs: &[Verb], 
             if here { line.style(Style::default().bg(theme.highlight.unwrap_or(theme.base))) } else { line }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    fn drawn(width: u16, height: u16) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("a test backend");
+        let popup = Popup { title: "acme/widgets", prompt: Line::from("› nina"), footer: "enter open" };
+        let rows = |_| (0..MAX_SHOWN).map(|i| Line::from(format!("row {i}"))).collect();
+        terminal.draw(|f| draw(f, &Theme::default(), f.area(), popup, rows)).expect("a draw");
+        let buffer = terminal.backend().buffer();
+        buffer
+            .content()
+            .chunks(buffer.area.width as usize)
+            .map(|row| row.iter().map(ratatui::buffer::Cell::symbol).collect::<String>() + "\n")
+            .collect()
+    }
+
+    #[test]
+    fn the_footer_shows_under_a_full_list() {
+        let screen = drawn(60, 30);
+        assert!(screen.contains("enter open"));
+        assert!(screen.contains(&format!("row {}", MAX_SHOWN - 1)));
+    }
+
+    #[test]
+    fn a_short_terminal_cuts_the_list_and_keeps_the_prompt_and_footer() {
+        let screen = drawn(60, 8);
+        assert!(screen.contains("› nina"));
+        assert!(screen.contains("enter open"));
+        assert!(screen.contains("row 2"));
+        assert!(!screen.contains("row 3"));
+    }
 }
