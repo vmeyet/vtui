@@ -14,6 +14,8 @@ libc = "0.2"
 ratatui = "0.30"
 tempfile = "3.20"
 tracing = { version = "0.1", default-features = false, features = ["std"] }
+# Grapheme clusters, so a wrap never splits an accent or an emoji sequence; ratatui already pulls it in.
+unicode-segmentation = "1.13"
 unicode-width = "0.2"
 
 [dev-dependencies]
