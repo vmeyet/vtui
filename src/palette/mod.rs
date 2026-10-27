@@ -77,14 +77,16 @@ impl<M: Mode> Palette<M> {
     }
 
     /// Types pasted text as [`Palette::type_char`] types each character, cleaned as [`Field::paste`] cleans it,
-    /// with a newline turned into a space since the line is one line.
+    /// with a newline turned into a space since the line is one line, and the blank space around it dropped
+    /// so a copied `orders\n` still matches.
     ///
     /// [`Field::paste`]: crate::field::Field::paste
     pub fn type_str(&mut self, text: &str) {
-        let line = field::clean_paste(text).replace('\n', " ");
+        let cleaned = field::clean_paste(text).replace('\n', " ");
+        let line = cleaned.trim();
         let rest = match line.chars().next() {
             Some(first) if self.switch_on(first) => &line[first.len_utf8()..],
-            _ => &line,
+            _ => line,
         };
         self.input.push_str(rest);
         self.after_typing();
@@ -320,9 +322,16 @@ mod tests {
 
     #[test]
     fn a_paste_turns_newlines_into_spaces_and_drops_controls() {
-        let mut p = typed("go");
-        p.type_str("\r\nacme/widgets\n!42\t\u{1b}x");
-        assert_eq!(p.input, "go acme/widgets !42    x");
+        let mut p = typed("go ");
+        p.type_str("acme/widgets\r\n!42\n\t\u{1b}x");
+        assert_eq!(p.input, "go acme/widgets !42     x");
+    }
+
+    #[test]
+    fn a_paste_drops_the_blank_space_around_it() {
+        let mut p = Palette::<Searching>::default();
+        p.type_str(" \t orders  list\r\n");
+        assert_eq!(p.input, "orders  list");
     }
 
     #[test]
