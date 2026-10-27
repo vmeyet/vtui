@@ -2,8 +2,8 @@
 //! VS Code does. The app names its modes and parses the line; the palette keeps what is typed, the highlighted
 //! row, the history, and tab completion with a ghost suggestion.
 use crate::complete::{self, Cycle};
-use crate::fuzzy;
 use crate::toward::Toward;
+use crate::{field, fuzzy};
 
 pub mod view;
 
@@ -70,10 +70,34 @@ impl<M: Mode> Palette<M> {
 
     /// A first character the mode switches on changes the mode instead of being typed.
     pub fn type_char(&mut self, c: char) {
-        match self.mode.switched_by(c).filter(|_| self.input.is_empty()) {
-            Some(mode) => self.mode = mode,
-            None => self.input.push(c),
+        if !self.switch_on(c) {
+            self.input.push(c);
         }
+        self.after_typing();
+    }
+
+    /// Types pasted text as [`Palette::type_char`] types each character, cleaned as [`Field::paste`] cleans it,
+    /// with a newline turned into a space since the line is one line.
+    ///
+    /// [`Field::paste`]: crate::field::Field::paste
+    pub fn type_str(&mut self, text: &str) {
+        let line = field::clean_paste(text).replace('\n', " ");
+        let rest = match line.chars().next() {
+            Some(first) if self.switch_on(first) => &line[first.len_utf8()..],
+            _ => &line,
+        };
+        self.input.push_str(rest);
+        self.after_typing();
+    }
+
+    /// Switches to the mode `first` picks, when it is typed on an empty line; whether it did.
+    fn switch_on(&mut self, first: char) -> bool {
+        let Some(mode) = self.mode.switched_by(first).filter(|_| self.input.is_empty()) else { return false };
+        self.mode = mode;
+        true
+    }
+
+    fn after_typing(&mut self) {
         self.selected = 0;
         self.cycle = None;
     }
@@ -277,5 +301,37 @@ mod tests {
         p.history_down();
         p.history_down();
         assert_eq!(p.input, "");
+    }
+
+    #[test]
+    fn a_paste_on_an_empty_line_switches_the_mode_on_its_first_character() {
+        let mut p = Palette::<Searching>::default();
+        p.type_str(">go");
+        assert_eq!((p.mode, p.input.as_str()), (Searching::Commands, "go"));
+    }
+
+    #[test]
+    fn a_paste_after_typed_text_switches_no_mode() {
+        let mut p = Palette::<Searching>::default();
+        p.type_char('a');
+        p.type_str(">go");
+        assert_eq!((p.mode, p.input.as_str()), (Searching::Things, "a>go"));
+    }
+
+    #[test]
+    fn a_paste_turns_newlines_into_spaces_and_drops_controls() {
+        let mut p = typed("go");
+        p.type_str("\r\nacme/widgets\n!42\t\u{1b}x");
+        assert_eq!(p.input, "go acme/widgets !42    x");
+    }
+
+    #[test]
+    fn a_paste_resets_the_highlight_and_the_completion_cycle() {
+        let things = vec!["!42".to_owned(), "!41".to_owned()];
+        let mut p = typed("go 4");
+        p.complete(&things, Toward::Next);
+        p.move_by(3, 5);
+        p.type_str("nina");
+        assert_eq!((p.selected, p.hint()), (0, None));
     }
 }

@@ -2,22 +2,30 @@
 //! The cursor is a byte offset kept on a character boundary, so an accent or an emoji never splits.
 
 /// A line of text being typed, or several, with the cursor in it.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default)]
 pub struct Field {
     text: String,
     cursor: usize,
+    revision: u64,
+}
+
+/// The revision is history, not content: it takes no part.
+impl PartialEq for Field {
+    fn eq(&self, other: &Self) -> bool {
+        self.text == other.text && self.cursor == other.cursor
+    }
 }
 
 impl Field {
     /// Starts on `text` with the cursor after its last character, where typing goes on.
     pub fn new(text: impl Into<String>) -> Self {
         let text = text.into();
-        Self { cursor: text.len(), text }
+        Self { cursor: text.len(), text, revision: 0 }
     }
 
     /// Starts on `before` then `after`, with the cursor between them: where a completed word ends.
     pub fn joined(before: &str, after: &str) -> Self {
-        Self { cursor: before.len(), text: format!("{before}{after}") }
+        Self { cursor: before.len(), text: format!("{before}{after}"), revision: 0 }
     }
 
     /// What is typed.
@@ -27,6 +35,9 @@ impl Field {
 
     /// Hands the text over and leaves the row empty.
     pub fn take(&mut self) -> String {
+        if !self.text.is_empty() {
+            self.changed();
+        }
         self.cursor = 0;
         std::mem::take(&mut self.text)
     }
@@ -49,10 +60,33 @@ impl Field {
         (&self.text[..start], &self.text[start..end], &self.text[end..])
     }
 
+    /// A count that grows with every change to the text and only then, so an app can tell the text moved on
+    /// since it last looked without keeping a copy. Two fields with the same text and cursor are equal whatever it is.
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
     /// Types `c` at the cursor.
     pub fn insert(&mut self, c: char) {
         self.text.insert(self.cursor, c);
         self.cursor += c.len_utf8();
+        self.changed();
+    }
+
+    /// Types `text` at the cursor as one edit, the cursor after it.
+    pub fn insert_str(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        self.text.insert_str(self.cursor, text);
+        self.cursor += text.len();
+        self.changed();
+    }
+
+    /// Types what was pasted at the cursor as one edit: line endings become `\n`, a tab four spaces, and control
+    /// characters that could move the cursor or reorder the text on screen are dropped.
+    pub fn paste(&mut self, text: &str) {
+        self.insert_str(&clean_paste(text));
     }
 
     /// Erases the character before the cursor; nothing at the start.
@@ -60,20 +94,30 @@ impl Field {
         let Some(prev) = self.prev() else { return };
         self.text.remove(prev);
         self.cursor = prev;
+        self.changed();
     }
 
     /// Erases the character under the cursor; nothing at the end.
     pub fn delete(&mut self) {
         if !self.at_end() {
             self.text.remove(self.cursor);
+            self.changed();
         }
     }
 
     /// Deletes back to the start of the word the cursor follows, the spaces in between included.
     pub fn delete_word(&mut self) {
         let from = self.word_start();
+        if from == self.cursor {
+            return;
+        }
         self.text.replace_range(from..self.cursor, "");
         self.cursor = from;
+        self.changed();
+    }
+
+    fn changed(&mut self) {
+        self.revision = self.revision.wrapping_add(1);
     }
 
     /// One character back; nothing at the start.
@@ -159,6 +203,30 @@ impl Field {
             None => 0,
         }
     }
+}
+
+/// Pasted text made safe to type: `\r\n` and a lone `\r` become `\n`, a tab four spaces, and other control
+/// characters and bidi controls are dropped, as they could move the cursor or reorder the text on screen.
+pub(crate) fn clean_paste(text: &str) -> String {
+    let mut cleaned = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\r' => {
+                chars.next_if_eq(&'\n');
+                cleaned.push('\n');
+            }
+            '\t' => cleaned.push_str("    "),
+            '\n' => cleaned.push('\n'),
+            c if c.is_control() || is_bidi_control(c) => {}
+            c => cleaned.push(c),
+        }
+    }
+    cleaned
+}
+
+fn is_bidi_control(c: char) -> bool {
+    matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
 }
 
 #[cfg(test)]
@@ -400,5 +468,110 @@ mod tests {
     fn joined_puts_the_cursor_between_the_two_sides() {
         assert_eq!(shown(&Field::joined("hi :tada: ", " there")), "hi :tada: | there");
         assert_eq!(shown(&Field::joined("café", "")), "café|");
+    }
+
+    #[test]
+    fn insert_str_lands_at_the_cursor_and_leaves_the_cursor_after_it() {
+        let mut field = Field::new("hi there");
+        field.word_left();
+        field.insert_str("@nina ");
+        assert_eq!(shown(&field), "hi @nina |there");
+    }
+
+    #[test]
+    fn paste_types_the_cleaned_text_at_the_cursor() {
+        let mut field = Field::new("ab");
+        field.left();
+        field.paste("x\r\ny\tz");
+        assert_eq!(shown(&field), "ax\ny    z|b");
+    }
+
+    #[test]
+    fn a_cleaned_paste_turns_every_line_ending_into_a_newline() {
+        assert_eq!(clean_paste("one\r\ntwo\rthree\nfour"), "one\ntwo\nthree\nfour");
+    }
+
+    #[test]
+    fn a_cleaned_paste_turns_a_tab_into_four_spaces() {
+        assert_eq!(clean_paste("a\tb"), "a    b");
+    }
+
+    #[test]
+    fn a_cleaned_paste_drops_control_characters() {
+        assert_eq!(clean_paste("a\u{0}b\u{1b}[31mc\u{7f}d\u{85}e\u{9f}f"), "ab[31mcdef");
+    }
+
+    #[test]
+    fn a_cleaned_paste_drops_bidi_controls() {
+        assert_eq!(clean_paste("\u{202a}a\u{202e}b\u{2066}c\u{2069}"), "abc");
+    }
+
+    #[test]
+    fn a_cleaned_paste_keeps_accents_and_emoji() {
+        assert_eq!(clean_paste("café 🚀"), "café 🚀");
+    }
+
+    #[test]
+    fn every_edit_that_changes_the_text_grows_the_revision() {
+        let mut field = Field::new("acme widgets");
+        let mut seen = vec![field.revision()];
+        let edits: [fn(&mut Field); 7] = [
+            |field| field.insert('!'),
+            |field| field.insert_str("ok"),
+            |field| field.paste("go"),
+            Field::backspace,
+            |field| {
+                field.start();
+                field.delete();
+            },
+            |field| {
+                field.end();
+                field.delete_word();
+            },
+            |field| {
+                field.take();
+            },
+        ];
+        for edit in edits {
+            edit(&mut field);
+            seen.push(field.revision());
+        }
+        assert!(seen.is_sorted() && seen.windows(2).all(|pair| pair[0] != pair[1]), "{seen:?}");
+    }
+
+    #[test]
+    fn moving_the_cursor_keeps_the_revision() {
+        let mut field = Field::new("acme widgets\nnina");
+        let before = field.revision();
+        field.left();
+        field.word_left();
+        field.up();
+        field.down();
+        field.right();
+        field.word_right();
+        field.start();
+        field.end();
+        assert_eq!(field.revision(), before);
+    }
+
+    #[test]
+    fn an_edit_that_changes_nothing_keeps_the_revision() {
+        let mut field = Field::default();
+        let before = field.revision();
+        field.backspace();
+        field.delete();
+        field.delete_word();
+        field.take();
+        field.insert_str("");
+        field.paste("\u{0}");
+        assert_eq!(field.revision(), before);
+    }
+
+    #[test]
+    fn fields_with_the_same_text_and_cursor_are_equal_whatever_their_history() {
+        let mut edited = Field::new("nina");
+        edited.insert('!');
+        edited.backspace();
+        assert_eq!(edited, Field::new("nina"));
     }
 }

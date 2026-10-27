@@ -1,9 +1,11 @@
-//! The terminal as the app holds it: raw mode on the alternate screen, the mouse wheel and drags, focus changes, and ⌘
-//! reported where the terminal speaks the kitty keyboard protocol (Ghostty, Kitty, `WezTerm`,
+//! The terminal as the app holds it: raw mode on the alternate screen, the mouse wheel and drags, focus changes,
+//! pastes in one piece, and ⌘ reported where the terminal speaks the kitty keyboard protocol (Ghostty, Kitty, `WezTerm`,
 //! iTerm2 with the option on), so ⌘K reaches the palette like ctrl-k does.
 use crate::log::OrWarn as _;
+use crossterm::Command;
 use crossterm::event::{
-    DisableFocusChange, EnableFocusChange, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    DisableBracketedPaste, DisableFocusChange, EnableBracketedPaste, EnableFocusChange, KeyboardEnhancementFlags,
+    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::terminal::{EnterAlternateScreen, enable_raw_mode};
 use ratatui::DefaultTerminal;
@@ -11,10 +13,13 @@ use std::io::Write;
 
 /// Clicks, drags and the wheel, in the SGR encoding. Not crossterm's `EnableMouseCapture`: it also
 /// asks for every pointer move without a button down, which would wake the loop for nothing.
-const MOUSE_ON: &[u8] = b"\x1b[?1000h\x1b[?1002h\x1b[?1006h";
-const MOUSE_OFF: &[u8] = b"\x1b[?1006l\x1b[?1002l\x1b[?1000l";
+const MOUSE_ON: &str = "\x1b[?1000h\x1b[?1002h\x1b[?1006h";
+const MOUSE_OFF: &str = "\x1b[?1006l\x1b[?1002l\x1b[?1000l";
 
 /// What the app asked of the terminal, so it can take it back exactly.
+///
+/// Pasted text arrives as one `Event::Paste(String)`, which the app must handle: a paste is not typed key by key,
+/// so a pasted newline no longer arrives as Enter, and an app that ignores the event ignores the paste.
 #[derive(Debug)]
 pub struct Screen {
     taken: Taken,
@@ -28,17 +33,17 @@ enum Mouse {
 }
 
 impl Mouse {
-    fn on(self) -> &'static [u8] {
+    fn on(self) -> &'static str {
         match self {
             Self::Captured => MOUSE_ON,
-            Self::Free => b"",
+            Self::Free => "",
         }
     }
 
-    fn off(self) -> &'static [u8] {
+    fn off(self) -> &'static str {
         match self {
             Self::Captured => MOUSE_OFF,
-            Self::Free => b"",
+            Self::Free => "",
         }
     }
 }
@@ -51,18 +56,31 @@ struct Taken {
 }
 
 impl Taken {
-    /// Focus changes tell the app when the terminal goes to the background and comes back.
-    fn take_mouse_and_focus(self) {
-        write(self.mouse.on());
-        crossterm::execute!(std::io::stdout(), EnableFocusChange).or_warn("asking for focus changes");
+    fn take(self) {
+        write(&self.asked());
     }
 
     fn give_back(self) {
-        write(self.mouse.off());
-        crossterm::execute!(std::io::stdout(), DisableFocusChange).or_warn("stopping focus changes");
+        write(&self.given_back());
         if self.modifiers {
             stop_modifiers();
         }
+    }
+
+    /// The mouse, focus changes, which tell the app when the terminal goes to the background and comes back,
+    /// and bracketed paste, which hands a paste over whole so its newlines are not read as Enter.
+    fn asked(self) -> String {
+        let mut sequence = self.mouse.on().to_owned();
+        EnableFocusChange.write_ansi(&mut sequence).or_warn("asking for focus changes");
+        EnableBracketedPaste.write_ansi(&mut sequence).or_warn("asking for pastes as one event");
+        sequence
+    }
+
+    fn given_back(self) -> String {
+        let mut sequence = self.mouse.off().to_owned();
+        DisableFocusChange.write_ansi(&mut sequence).or_warn("stopping focus changes");
+        DisableBracketedPaste.write_ansi(&mut sequence).or_warn("stopping pastes as one event");
+        sequence
     }
 }
 
@@ -84,7 +102,7 @@ impl Screen {
         let modifiers = crossterm::terminal::supports_keyboard_enhancement().unwrap_or(false) && report_modifiers();
         let screen = Self { taken: Taken { mouse, modifiers } };
         screen.take_extras_back_on_panic();
-        screen.taken.take_mouse_and_focus();
+        screen.taken.take();
         (terminal, screen)
     }
 
@@ -114,15 +132,15 @@ impl Screen {
         if self.taken.modifiers {
             report_modifiers();
         }
-        self.taken.take_mouse_and_focus();
+        self.taken.take();
         terminal.clear().or_warn("clearing the terminal");
         outcome
     }
 }
 
-fn write(sequence: &[u8]) {
+fn write(sequence: &str) {
     let mut out = std::io::stdout();
-    out.write_all(sequence).and_then(|()| out.flush()).or_warn("writing to the terminal");
+    out.write_all(sequence.as_bytes()).and_then(|()| out.flush()).or_warn("writing to the terminal");
 }
 
 fn report_modifiers() -> bool {
@@ -146,7 +164,19 @@ mod tests {
 
     #[test]
     fn a_free_mouse_sends_nothing_either_way() {
-        assert_eq!(Mouse::Free.on(), b"");
-        assert_eq!(Mouse::Free.off(), b"");
+        assert_eq!(Mouse::Free.on(), "");
+        assert_eq!(Mouse::Free.off(), "");
+    }
+
+    #[test]
+    fn taking_the_terminal_asks_for_pastes_as_one_event() {
+        let taken = Taken { mouse: Mouse::Free, modifiers: false };
+        assert!(taken.asked().contains("\x1b[?2004h"));
+    }
+
+    #[test]
+    fn giving_the_terminal_back_stops_pastes_as_one_event() {
+        let taken = Taken { mouse: Mouse::Free, modifiers: false };
+        assert!(taken.given_back().contains("\x1b[?2004l"));
     }
 }
