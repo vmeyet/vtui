@@ -1,7 +1,7 @@
 //! The palette, `ctrl-k` or `⌘k`: one line that finds things or runs commands, picked by the first character as
 //! VS Code does. The app names its modes and parses the line; the palette keeps what is typed, the highlighted
 //! row, the history, and tab completion with a ghost suggestion.
-use crate::complete::{self, Cycle};
+use crate::complete::{self, Cycle, Ghost};
 use crate::toward::Toward;
 use crate::{field, fuzzy};
 
@@ -137,29 +137,28 @@ impl<M: Mode> Palette<M> {
             let Some(cycle) = Cycle::new(token, candidates) else { return };
             Cycling { prefix: prefix.to_owned(), cycle }
         };
-        let chosen = cycling.cycle.current();
-        let trailing = if chosen.ends_with('=') { "" } else { " " };
-        self.input = format!("{}{chosen}{trailing}", cycling.prefix);
+        self.input = completed(&cycling.prefix, cycling.cycle.current());
         self.cycle = Some(cycling);
     }
 
     /// The grey rest of the best completion for the token being typed, as a shell shows it.
     pub fn ghost(&self, candidates: &[String]) -> Option<String> {
+        Some(self.best_ghost(candidates)?.rest)
+    }
+
+    /// Accepts the ghost, as `→` does in a shell: the token becomes the candidate as spelled in the list.
+    pub fn accept(&mut self, candidates: &[String]) {
+        let Some(ghost) = self.best_ghost(candidates) else { return };
+        let (prefix, _) = split_last_token(&self.input);
+        self.input = completed(prefix, &ghost.name);
+    }
+
+    fn best_ghost(&self, candidates: &[String]) -> Option<Ghost> {
         if self.cycle.is_some() {
             return None;
         }
         let (_, token) = split_last_token(&self.input);
         complete::ghost(token, candidates)
-    }
-
-    /// Accepts the ghost text, as `→` does in a shell.
-    pub fn accept(&mut self, candidates: &[String]) {
-        if let Some(rest) = self.ghost(candidates) {
-            self.input.push_str(&rest);
-            if !self.input.ends_with('=') {
-                self.input.push(' ');
-            }
-        }
     }
 
     /// The options tab is cycling through, the one in hand between brackets.
@@ -210,6 +209,12 @@ fn split_last_token(input: &str) -> (&str, &str) {
     }
 }
 
+/// The line with `name` as its last token, then a space for the next one unless `name` waits for a value after `=`.
+fn completed(prefix: &str, name: &str) -> String {
+    let trailing = if name.ends_with('=') { "" } else { " " };
+    format!("{prefix}{name}{trailing}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -255,6 +260,15 @@ mod tests {
         assert!(p.hint().unwrap().starts_with("[!42]"));
         p.complete(&things, Toward::Next);
         assert_eq!(p.input, "go !41 ");
+    }
+
+    #[test]
+    fn accepting_the_ghost_spells_the_token_as_the_candidate_does() {
+        let tables = vec!["Orders".to_owned()];
+        let mut p = typed("go ord");
+        assert_eq!(p.ghost(&tables).as_deref(), Some("ers"));
+        p.accept(&tables);
+        assert_eq!(p.input, "go Orders ");
     }
 
     #[test]

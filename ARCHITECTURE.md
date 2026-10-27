@@ -23,7 +23,7 @@ If a move from an app would need vtui to know an app type, the piece is made gen
 | `field` | `Field`: the input box, its text and cursor in one value, the word under the cursor, a paste cleaned and typed as one edit, a `revision` that grows with every change to the text, and `Field::secret` whose `Debug` prints the length, never the text |
 | `fuzzy` | fzf-style subsequence ranking, the single obvious match, and suggestions for a mistyped word |
 | `toward` | `Toward`: which way a move goes through a list that wraps around |
-| `complete` | Tab completion for any input box: `Cycle` through the candidates and the `ghost` of the best one; `Index` holds a long list lowercased and sorted once, so the names a token starts are a binary search and fuzzy matches only fill the room up to 50 |
+| `complete` | Tab completion for any input box: `Cycle` through the candidates and the `Ghost` of the best one, named as spelled in the list; `Index` holds a long list lowercased and sorted once, so the names a token starts are a binary search and fuzzy matches only fill the room up to 50 |
 | `palette` | `Palette<M>`: the `ctrl-k` line, generic over the app's `Mode`, a paste typed on its one line; `Verb` and `verbs_for` for its command list; `view` draws the popup, each `Pick` a row whose styled detail, such as badges, is cut only after the label |
 | `editor` | `editor::edit`: long text written in `$VISUAL` or `$EDITOR` through a temp file, `Edited` says how it came back |
 | `help` | `Help` and `draw`: the `?` overlay over the `Section`s the app builds, in one or two columns |
