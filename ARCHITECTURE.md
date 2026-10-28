@@ -29,11 +29,13 @@ If a move from an app would need vtui to know an app type, the piece is made gen
 | `help` | `Help` and `draw`: the `?` overlay over the `Section`s the app builds, in one or two columns |
 | `clipboard` | `clipboard::print`: the terminal's clipboard through OSC 52, wrapped for tmux |
 | `motion` | `Motion`: how often the screen moves on its own, lively or calm |
+| `usage` | Opt-in usage counts: a `Tally` of actions, screen time and habits in memory, the `Clock` that stops screen time when idle or in the background, the JSON-lines file of one `Day` a line read and merged as text, and the `Report` over a `Window`; the app hands in its names as `Rules` (actions, groups, hints, renames, how it counts) and reads and writes the file itself |
 | `log` | `OrWarn`: a failed terminal write logged through `tracing`, never dropped (private) |
 
 ## Boundaries
 
 - Side effects live in `screen`, `ground`, `clipboard` and `editor`: the first three write to the terminal or read `/dev/tty`, `editor` writes a temp file and runs the user's editor.
 - Every other module is pure: values in, values or `ratatui` lines out.
+  `usage` reads no clock and no file: the app hands it `now`, the date and the file's text, and writes what it gives back.
 - Drawing goes through a `ratatui::Frame` the app hands in; vtui never owns the terminal loop.
 - Errors of best-effort terminal writes go to `tracing`; the app decides where the log goes.

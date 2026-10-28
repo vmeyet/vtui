@@ -9,9 +9,14 @@ repository = "https://github.com/vmeyet/vtui"
 
 [dependencies]
 base64 = "0.22"
+# A usage file dates each line by local day; the app reads the clock, so no `clock` feature.
+chrono = { version = "0.4", default-features = false, features = ["serde", "std"] }
 crossterm = "0.29"
 libc = "0.2"
 ratatui = "0.30"
+# A usage file's JSON lines.
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 tempfile = "3.20"
 tracing = { version = "0.1", default-features = false, features = ["std"] }
 # Grapheme clusters, so a wrap never splits an accent or an emoji sequence; ratatui already pulls it in.
