@@ -2,6 +2,7 @@
 //! The cursor is a byte offset kept on a character boundary, so an accent or an emoji never splits.
 
 use std::fmt;
+use std::ops::Range;
 
 /// A line of text being typed, or several, with the cursor in it.
 #[derive(Clone, Default)]
@@ -129,12 +130,31 @@ impl Field {
 
     /// Deletes back to the start of the word the cursor follows, the spaces in between included.
     pub fn delete_word(&mut self) {
-        let from = self.word_start();
-        if from == self.cursor {
+        self.delete_range(self.word_start()..self.cursor);
+    }
+
+    /// Deletes from the cursor to the end of its line, as `ctrl-k` does in a shell; at the end of a line, the line break.
+    pub fn delete_to_line_end(&mut self) {
+        let end = self.end_of_line(self.cursor);
+        let end = if end == self.cursor { self.next().unwrap_or(end) } else { end };
+        self.delete_range(self.cursor..end);
+    }
+
+    /// Deletes from the start of the cursor's line to the cursor, as `ctrl-u` does in a shell; at the start of a line,
+    /// the line break before it.
+    pub fn delete_to_line_start(&mut self) {
+        let start = self.start_of_line(self.cursor);
+        let start = if start == self.cursor { self.prev().unwrap_or(start) } else { start };
+        self.delete_range(start..self.cursor);
+    }
+
+    /// Deletes `range`, which starts or ends at the cursor, and leaves the cursor at its start.
+    fn delete_range(&mut self, range: Range<usize>) {
+        if range.is_empty() {
             return;
         }
-        self.text.replace_range(from..self.cursor, "");
-        self.cursor = from;
+        self.cursor = range.start;
+        self.text.replace_range(range, "");
         self.changed();
     }
 
@@ -175,38 +195,48 @@ impl Field {
         self.cursor = self.text.len();
     }
 
+    /// To the start of the cursor's line, as `ctrl-a` does in a shell.
+    pub fn line_start(&mut self) {
+        self.cursor = self.start_of_line(self.cursor);
+    }
+
+    /// To the end of the cursor's line, as `ctrl-e` does in a shell.
+    pub fn line_end(&mut self) {
+        self.cursor = self.end_of_line(self.cursor);
+    }
+
     /// To the line above, at the same column or the end of a shorter line; nothing on the first line.
     pub fn up(&mut self) {
-        let start = self.line_start(self.cursor);
+        let start = self.start_of_line(self.cursor);
         if start > 0 {
-            self.cursor = self.at_column(self.line_start(start - 1), self.column());
+            self.cursor = self.at_column(self.start_of_line(start - 1), self.column());
         }
     }
 
     /// To the line below, at the same column or the end of a shorter line; nothing on the last line.
     pub fn down(&mut self) {
-        let end = self.line_end(self.cursor);
+        let end = self.end_of_line(self.cursor);
         if end < self.text.len() {
             self.cursor = self.at_column(end + 1, self.column());
         }
     }
 
-    fn line_start(&self, at: usize) -> usize {
+    fn start_of_line(&self, at: usize) -> usize {
         self.text[..at].rfind('\n').map_or(0, |newline| newline + 1)
     }
 
-    fn line_end(&self, at: usize) -> usize {
+    fn end_of_line(&self, at: usize) -> usize {
         self.text[at..].find('\n').map_or(self.text.len(), |newline| at + newline)
     }
 
     /// How many characters sit between the start of the cursor's line and the cursor.
     fn column(&self) -> usize {
-        self.text[self.line_start(self.cursor)..self.cursor].chars().count()
+        self.text[self.start_of_line(self.cursor)..self.cursor].chars().count()
     }
 
     /// The offset `column` characters into the line starting at `start`, or that line's end.
     fn at_column(&self, start: usize, column: usize) -> usize {
-        let end = self.line_end(start);
+        let end = self.end_of_line(start);
         self.text[start..end].char_indices().nth(column).map_or(end, |(offset, _)| start + offset)
     }
 
@@ -336,6 +366,61 @@ mod tests {
         assert_eq!(shown(&field), "|hey");
         field.end();
         assert_eq!(shown(&field), "hey|");
+    }
+
+    #[test]
+    fn line_start_and_line_end_stay_on_the_cursor_s_line() {
+        let mut field = typed("SELECT id\nFROM orders\nLIMIT 1");
+        field.up();
+        field.line_start();
+        assert_eq!(shown(&field), "SELECT id\n|FROM orders\nLIMIT 1");
+        field.line_end();
+        assert_eq!(shown(&field), "SELECT id\nFROM orders|\nLIMIT 1");
+    }
+
+    #[test]
+    fn delete_to_line_end_keeps_the_other_lines() {
+        let mut field = typed("SELECT id\nFROM orders\nLIMIT 1");
+        field.up();
+        field.line_start();
+        field.word_right();
+        field.delete_to_line_end();
+        assert_eq!(shown(&field), "SELECT id\nFROM|\nLIMIT 1");
+    }
+
+    #[test]
+    fn delete_to_line_end_at_the_end_of_a_line_joins_the_next_one() {
+        let mut field = typed("FROM\norders");
+        field.up();
+        field.delete_to_line_end();
+        assert_eq!(shown(&field), "FROM|orders");
+    }
+
+    #[test]
+    fn delete_to_line_start_keeps_the_other_lines() {
+        let mut field = typed("SELECT id\nFROM orders\nLIMIT 1");
+        field.up();
+        field.delete_to_line_start();
+        assert_eq!(shown(&field), "SELECT id\n|ders\nLIMIT 1");
+    }
+
+    #[test]
+    fn delete_to_line_start_at_the_start_of_a_line_joins_the_one_above() {
+        let mut field = typed("FROM\norders");
+        field.line_start();
+        field.delete_to_line_start();
+        assert_eq!(shown(&field), "FROM|orders");
+    }
+
+    #[test]
+    fn deletes_to_a_line_s_ends_do_nothing_at_the_text_s_ends() {
+        let mut at_end = Field::new("café");
+        at_end.delete_to_line_end();
+        assert_eq!((shown(&at_end), at_end.revision()), ("café|".to_owned(), 0));
+        let mut at_start = Field::new("café");
+        at_start.start();
+        at_start.delete_to_line_start();
+        assert_eq!((shown(&at_start), at_start.revision()), ("|café".to_owned(), 0));
     }
 
     #[test]
@@ -537,7 +622,7 @@ mod tests {
     fn every_edit_that_changes_the_text_grows_the_revision() {
         let mut field = Field::new("acme widgets");
         let mut seen = vec![field.revision()];
-        let edits: [fn(&mut Field); 7] = [
+        let edits: [fn(&mut Field); 9] = [
             |field| field.insert('!'),
             |field| field.insert_str("ok"),
             |field| field.paste("go"),
@@ -549,6 +634,13 @@ mod tests {
             |field| {
                 field.end();
                 field.delete_word();
+            },
+            Field::delete_to_line_start,
+            |field| {
+                field.insert_str("acme widgets");
+                field.start();
+                field.word_right();
+                field.delete_to_line_end();
             },
             |field| {
                 field.take();
@@ -573,6 +665,8 @@ mod tests {
         field.word_right();
         field.start();
         field.end();
+        field.line_start();
+        field.line_end();
         assert_eq!(field.revision(), before);
     }
 
