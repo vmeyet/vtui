@@ -1,6 +1,7 @@
 //! Terminal UI building blocks that know nothing of the app using them: the terminal itself, its background,
 //! a theme, an input box, fuzzy matching and completion, the `ctrl-k` palette, the `?` overlay,
-//! the clipboard, the user's editor for long text, and opt-in usage counts.
+//! double and triple clicks, the clipboard, the user's editor for long text, and opt-in usage counts.
+pub mod click;
 pub mod clipboard;
 pub mod complete;
 pub mod editor;

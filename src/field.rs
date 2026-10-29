@@ -1,22 +1,36 @@
 //! The input box: its text and where the cursor sits, in one value so the two cannot drift.
 //! The cursor is a byte offset kept on a character boundary, so an accent or an emoji never splits.
+//! A selection runs from an anchor to the cursor; a move or an edit drops it.
 
 use std::fmt;
 use std::ops::Range;
+use unicode_width::UnicodeWidthChar as _;
 
 /// A line of text being typed, or several, with the cursor in it.
 #[derive(Clone, Default)]
 pub struct Field {
     text: String,
     cursor: usize,
+    /// Where the selection started, the cursor being its other end; `None` when nothing is selected.
+    anchor: Option<usize>,
     revision: u64,
     secret: bool,
+}
+
+/// A place in the text as the screen shows it: the line, and the terminal column in that line, both from 0, so a
+/// wide character such as an emoji takes two columns.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Place {
+    /// The line, from 0.
+    pub line: usize,
+    /// The terminal column in the line, from 0.
+    pub column: usize,
 }
 
 /// The revision is history and the secret mark is how the field prints, not content: neither takes part.
 impl PartialEq for Field {
     fn eq(&self, other: &Self) -> bool {
-        self.text == other.text && self.cursor == other.cursor
+        self.text == other.text && self.cursor == other.cursor && self.anchor == other.anchor
     }
 }
 
@@ -29,7 +43,7 @@ impl fmt::Debug for Field {
         } else {
             debug.field("text", &self.text);
         }
-        debug.field("cursor", &self.cursor).field("revision", &self.revision).finish()
+        debug.field("cursor", &self.cursor).field("anchor", &self.anchor).field("revision", &self.revision).finish()
     }
 }
 
@@ -37,7 +51,7 @@ impl Field {
     /// Starts on `text` with the cursor after its last character, where typing goes on.
     pub fn new(text: impl Into<String>) -> Self {
         let text = text.into();
-        Self { cursor: text.len(), text, revision: 0, secret: false }
+        Self { cursor: text.len(), text, ..Self::default() }
     }
 
     /// Starts like [`Field::new`], but its `Debug` never prints the text, so personal data kept in it
@@ -48,7 +62,7 @@ impl Field {
 
     /// Starts on `before` then `after`, with the cursor between them: where a completed word ends.
     pub fn joined(before: &str, after: &str) -> Self {
-        Self { cursor: before.len(), text: format!("{before}{after}"), revision: 0, secret: false }
+        Self { cursor: before.len(), text: format!("{before}{after}"), ..Self::default() }
     }
 
     /// What is typed.
@@ -61,7 +75,7 @@ impl Field {
         if !self.text.is_empty() {
             self.changed();
         }
-        self.cursor = 0;
+        self.go(0);
         std::mem::take(&mut self.text)
     }
 
@@ -158,23 +172,31 @@ impl Field {
         self.changed();
     }
 
+    /// Every change to the text drops the selection, whose ends would no longer fall on the text it meant.
     fn changed(&mut self) {
         self.revision = self.revision.wrapping_add(1);
+        self.anchor = None;
+    }
+
+    /// Puts the cursor at byte `at`, dropping the selection as any move does.
+    fn go(&mut self, at: usize) {
+        self.cursor = at;
+        self.anchor = None;
     }
 
     /// One character back; nothing at the start.
     pub fn left(&mut self) {
-        self.cursor = self.prev().unwrap_or(0);
+        self.go(self.prev().unwrap_or(0));
     }
 
     /// One character on; nothing at the end.
     pub fn right(&mut self) {
-        self.cursor = self.next().unwrap_or(self.cursor);
+        self.go(self.next().unwrap_or(self.cursor));
     }
 
     /// To the start of the word the cursor follows, as `⌥←` does in a macOS text field.
     pub fn word_left(&mut self) {
-        self.cursor = self.word_start();
+        self.go(self.word_start());
     }
 
     /// To the end of the word ahead of the cursor, as `⌥→` does in a macOS text field.
@@ -182,34 +204,34 @@ impl Field {
         let rest = &self.text[self.cursor..];
         let word = rest.trim_start();
         let skipped = rest.len() - word.len();
-        self.cursor += skipped + word.find(char::is_whitespace).unwrap_or(word.len());
+        self.go(self.cursor + skipped + word.find(char::is_whitespace).unwrap_or(word.len()));
     }
 
     /// To the start of the text.
     pub fn start(&mut self) {
-        self.cursor = 0;
+        self.go(0);
     }
 
     /// To the end of the text.
     pub fn end(&mut self) {
-        self.cursor = self.text.len();
+        self.go(self.text.len());
     }
 
     /// To the start of the cursor's line, as `ctrl-a` does in a shell.
     pub fn line_start(&mut self) {
-        self.cursor = self.start_of_line(self.cursor);
+        self.go(self.start_of_line(self.cursor));
     }
 
     /// To the end of the cursor's line, as `ctrl-e` does in a shell.
     pub fn line_end(&mut self) {
-        self.cursor = self.end_of_line(self.cursor);
+        self.go(self.end_of_line(self.cursor));
     }
 
     /// To the line above, at the same column or the end of a shorter line; nothing on the first line.
     pub fn up(&mut self) {
         let start = self.start_of_line(self.cursor);
         if start > 0 {
-            self.cursor = self.at_column(self.start_of_line(start - 1), self.column());
+            self.go(self.at_column(self.start_of_line(start - 1), self.column()));
         }
     }
 
@@ -217,8 +239,63 @@ impl Field {
     pub fn down(&mut self) {
         let end = self.end_of_line(self.cursor);
         if end < self.text.len() {
-            self.cursor = self.at_column(end + 1, self.column());
+            self.go(self.at_column(end + 1, self.column()));
         }
+    }
+
+    /// To `place`, where a click lands; past a line's end, to that end, and below the last line, to the text's end.
+    pub fn move_to(&mut self, place: Place) {
+        self.go(self.offset_of(place));
+    }
+
+    /// Selects from where the selection started, else from the cursor, to `place`, where the cursor goes: what a drag
+    /// of the mouse does.
+    pub fn select_to(&mut self, place: Place) {
+        self.select(self.anchor.unwrap_or(self.cursor), self.offset_of(place));
+    }
+
+    /// Selects the word under the cursor, as [`Field::word`] reads it, the cursor at its end: what a double click does.
+    pub fn select_word(&mut self) {
+        let (before, word, _) = self.word();
+        self.select(before.len(), before.len() + word.len());
+    }
+
+    /// Selects the cursor's line without its line break, the cursor at its end: what a triple click does.
+    pub fn select_line(&mut self) {
+        self.select(self.start_of_line(self.cursor), self.end_of_line(self.cursor));
+    }
+
+    /// Selects from byte `anchor` to byte `cursor`, where the cursor goes.
+    fn select(&mut self, anchor: usize, cursor: usize) {
+        self.anchor = Some(anchor);
+        self.cursor = cursor;
+    }
+
+    /// The bytes of the text selected, on character boundaries; `None` when nothing is.
+    pub fn selection(&self) -> Option<Range<usize>> {
+        let anchor = self.anchor?;
+        let range = anchor.min(self.cursor)..anchor.max(self.cursor);
+        (!range.is_empty()).then_some(range)
+    }
+
+    /// Drops the selection and leaves the cursor where it is.
+    pub fn deselect(&mut self) {
+        self.anchor = None;
+    }
+
+    /// The byte at `place`: the character whose columns hold it, else the end of its line or of the text.
+    fn offset_of(&self, place: Place) -> usize {
+        let mut line_starts = std::iter::once(0).chain(self.text.match_indices('\n').map(|(newline, _)| newline + 1));
+        let Some(start) = line_starts.nth(place.line) else { return self.text.len() };
+        let end = self.end_of_line(start);
+        let mut columns = 0;
+        for (offset, c) in self.text[start..end].char_indices() {
+            columns += c.width().unwrap_or(0);
+            if columns > place.column {
+                return start + offset;
+            }
+        }
+        end
     }
 
     fn start_of_line(&self, at: usize) -> usize {
@@ -711,6 +788,114 @@ mod tests {
         let printed = format!("{:?}", field.clone());
         assert!(!printed.contains("widgets"), "{printed}");
         assert!(printed.contains("<redacted, 7 chars>"), "{printed}");
+    }
+
+    /// The text with the selection in brackets, so a test reads as what the row highlights.
+    fn selected(field: &Field) -> String {
+        let text = field.text();
+        field
+            .selection()
+            .map_or_else(|| text.to_owned(), |range| format!("{}[{}]{}", &text[..range.start], &text[range.clone()], &text[range.end..]))
+    }
+
+    fn place(line: usize, column: usize) -> Place {
+        Place { line, column }
+    }
+
+    #[test]
+    fn move_to_puts_the_cursor_at_the_line_and_column() {
+        let mut field = Field::new("SELECT id\nFROM orders");
+        field.move_to(place(1, 5));
+        assert_eq!(shown(&field), "SELECT id\nFROM |orders");
+    }
+
+    #[test]
+    fn move_to_past_a_line_s_end_stops_at_that_end() {
+        let mut field = Field::new("SELECT id\nFROM orders");
+        field.move_to(place(0, 40));
+        assert_eq!(shown(&field), "SELECT id|\nFROM orders");
+    }
+
+    #[test]
+    fn move_to_below_the_last_line_goes_to_the_text_s_end() {
+        let mut field = Field::new("SELECT id\nFROM orders");
+        field.start();
+        field.move_to(place(5, 0));
+        assert_eq!(shown(&field), "SELECT id\nFROM orders|");
+    }
+
+    #[test]
+    fn move_to_counts_a_wide_character_as_two_columns() {
+        let mut field = Field::new("🎉ok");
+        field.move_to(place(0, 1));
+        assert_eq!(shown(&field), "|🎉ok", "the second column of the emoji is the emoji");
+        field.move_to(place(0, 2));
+        assert_eq!(shown(&field), "🎉|ok");
+    }
+
+    #[test]
+    fn select_to_runs_from_the_cursor_to_the_place() {
+        let mut field = Field::new("SELECT id\nFROM orders");
+        field.move_to(place(0, 7));
+        field.select_to(place(1, 4));
+        assert_eq!(selected(&field), "SELECT [id\nFROM] orders");
+    }
+
+    #[test]
+    fn select_to_again_keeps_where_the_selection_started() {
+        let mut field = Field::new("SELECT id FROM orders");
+        field.move_to(place(0, 7));
+        field.select_to(place(0, 14));
+        field.select_to(place(0, 0));
+        assert_eq!(selected(&field), "[SELECT ]id FROM orders");
+    }
+
+    #[test]
+    fn select_word_takes_the_word_under_the_cursor() {
+        let mut field = Field::new("SELECT id FROM orders");
+        field.move_to(place(0, 17));
+        field.select_word();
+        assert_eq!(selected(&field), "SELECT id FROM [orders]");
+    }
+
+    #[test]
+    fn select_line_takes_the_cursor_s_line_without_its_break() {
+        let mut field = Field::new("SELECT id\nFROM orders\nLIMIT 1");
+        field.move_to(place(1, 2));
+        field.select_line();
+        assert_eq!(selected(&field), "SELECT id\n[FROM orders]\nLIMIT 1");
+    }
+
+    #[test]
+    fn an_empty_selection_is_none() {
+        let mut field = Field::new("SELECT  id");
+        field.move_to(place(0, 7));
+        field.select_word();
+        assert_eq!(field.selection(), None);
+    }
+
+    #[test]
+    fn a_move_drops_the_selection() {
+        let mut field = Field::new("SELECT id");
+        field.select_word();
+        field.left();
+        assert_eq!(field.selection(), None);
+    }
+
+    #[test]
+    fn an_edit_drops_the_selection() {
+        let mut field = Field::new("SELECT id");
+        field.select_word();
+        field.insert('s');
+        assert_eq!(selected(&field), "SELECT ids");
+    }
+
+    #[test]
+    fn deselect_keeps_the_cursor() {
+        let mut field = Field::new("SELECT id");
+        field.select_to(place(0, 0));
+        field.deselect();
+        assert_eq!((field.selection(), shown(&field)), (None, "|SELECT id".to_owned()));
     }
 
     #[test]
