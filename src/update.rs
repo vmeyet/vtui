@@ -39,7 +39,7 @@ pub enum Decision {
 }
 
 /// What `update` tells the app as it goes, for the app to say in its own words.
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug)]
 pub enum Step<'a> {
     /// The latest commit could not be asked; the update installs anyway.
     CheckFailed(&'a io::Error),
