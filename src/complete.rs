@@ -142,6 +142,11 @@ pub struct Cycle {
 }
 
 impl Cycle {
+    /// Whether it holds one option.
+    pub(crate) fn is_alone(&self) -> bool {
+        self.options.len() == 1
+    }
+
     /// [`Index::cycle`] for a short list, the index built on each call; a long list keeps its [`Index`].
     pub fn new<S: AsRef<str>>(token: &str, candidates: &[S]) -> Option<Self> {
         Index::new(candidates.iter().map(AsRef::as_ref)).cycle(token)
