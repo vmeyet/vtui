@@ -5,6 +5,8 @@ use crate::complete::{self, Cycle, Ghost};
 use crate::toward::Toward;
 use crate::{field, fuzzy};
 
+pub mod search;
+pub mod typed;
 pub mod view;
 
 /// How many rows the palette's list shows.
@@ -17,6 +19,20 @@ pub trait Mode: Copy + Default + PartialEq {
 
     /// Whether the line is a command: `↑ ↓` walk the commands while it names one, and tab completes it.
     fn takes_commands(self) -> bool;
+}
+
+/// The only mode of a line where everything typed is a command.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CommandLine;
+
+impl Mode for CommandLine {
+    fn switched_by(self, _first: char) -> Option<Self> {
+        None
+    }
+
+    fn takes_commands(self) -> bool {
+        true
+    }
 }
 
 /// A palette command: the word typed after `:`, and what the list says it does.
@@ -102,13 +118,13 @@ impl<M: Mode> Palette<M> {
     fn after_typing(&mut self) {
         self.selected = 0;
         self.cycle = None;
+        self.history_at = None;
     }
 
     /// Erases a character; on an empty line it steps back to the default mode first. `false` once there is
     /// nothing left to erase, which closes the palette.
     pub fn backspace(&mut self) -> bool {
-        self.selected = 0;
-        self.cycle = None;
+        self.after_typing();
         if self.input.pop().is_some() {
             return true;
         }
@@ -120,6 +136,29 @@ impl<M: Mode> Palette<M> {
     /// Still on the command's name: `↑ ↓` walk the list of commands, not the arguments.
     pub fn naming_command(&self) -> bool {
         self.mode.takes_commands() && !self.input.contains(char::is_whitespace)
+    }
+
+    /// `↑` or `↓`, the rule every app's palette shares: the highlight moves in the `listed` rows that show, 0 when none does.
+    /// `↑` on an empty line with nothing above the highlight recalls the last line submitted, and the arrows then walk
+    /// the lines submitted until a key changes the line. Says whether the line changed, so a list it narrows ranks again.
+    pub fn arrow(&mut self, toward: Toward, listed: usize) -> bool {
+        let recalls = self.walking_history() || (toward == Toward::Previous && self.can_start_recalling());
+        match toward {
+            Toward::Previous if recalls => self.history_up(),
+            Toward::Next if recalls => self.history_down(),
+            Toward::Previous => self.move_by(-1, listed),
+            Toward::Next => self.move_by(1, listed),
+        }
+        recalls
+    }
+
+    /// Whether the line came from the history and no key changed it since.
+    pub fn walking_history(&self) -> bool {
+        self.history_at.is_some()
+    }
+
+    fn can_start_recalling(&self) -> bool {
+        self.mode.takes_commands() && self.input.is_empty() && self.selected == 0 && !self.history.is_empty()
     }
 
     /// Moves the highlight in a list of `len` rows, staying inside it.
@@ -138,7 +177,8 @@ impl<M: Mode> Palette<M> {
             Cycling { prefix: prefix.to_owned(), cycle }
         };
         self.input = completed(&cycling.prefix, cycling.cycle.current());
-        self.cycle = Some(cycling);
+        self.after_typing();
+        self.cycle = (!cycling.cycle.is_alone()).then_some(cycling);
     }
 
     /// The grey rest of the best completion for the token being typed, as a shell shows it.
@@ -151,6 +191,7 @@ impl<M: Mode> Palette<M> {
         let Some(ghost) = self.best_ghost(candidates) else { return };
         let (prefix, _) = split_last_token(&self.input);
         self.input = completed(prefix, &ghost.name);
+        self.after_typing();
     }
 
     fn best_ghost(&self, candidates: &[String]) -> Option<Ghost> {
@@ -172,34 +213,39 @@ impl<M: Mode> Palette<M> {
             return;
         }
         let at = self.history_at.map_or(self.history.len() - 1, |i| i.saturating_sub(1));
+        self.after_typing();
         self.history_at = Some(at);
         self.input.clone_from(&self.history[at]);
-        self.cycle = None;
     }
 
     /// Recalls the line submitted after the one shown, or an empty line past the last.
     pub fn history_down(&mut self) {
         let Some(at) = self.history_at else { return };
+        self.after_typing();
         if at + 1 >= self.history.len() {
-            self.history_at = None;
             self.input.clear();
         } else {
             self.history_at = Some(at + 1);
             self.input.clone_from(&self.history[at + 1]);
         }
-        self.cycle = None;
     }
 
     /// Takes the line, remembers it, and leaves the palette empty for the next command.
     pub fn submit(&mut self) -> String {
         let line = std::mem::take(&mut self.input).trim().to_owned();
-        if !line.is_empty() && self.history.last() != Some(&line) {
-            self.history.push(line.clone());
-        }
+        self.history = remembered(std::mem::take(&mut self.history), &line);
         self.history_at = None;
         self.cycle = None;
         line
     }
+}
+
+/// The lines submitted with `line` added, unless it is blank or the last one again.
+pub fn remembered(mut history: Vec<String>, line: &str) -> Vec<String> {
+    if !line.is_empty() && history.last().is_none_or(|last| last != line) {
+        history.push(line.to_owned());
+    }
+    history
 }
 
 fn split_last_token(input: &str) -> (&str, &str) {
@@ -317,6 +363,123 @@ mod tests {
         p.history_down();
         p.history_down();
         assert_eq!(p.input, "");
+    }
+
+    fn submitted(lines: &[&str]) -> Palette<Searching> {
+        Palette::new(Searching::Commands, lines.iter().map(|line| (*line).to_owned()).collect())
+    }
+
+    #[test]
+    fn up_on_an_empty_line_with_a_list_recalls_the_last_line() {
+        let mut p = submitted(&["go !1", "quit"]);
+        assert!(p.arrow(Toward::Previous, 3));
+        assert_eq!(p.input, "quit");
+    }
+
+    #[test]
+    fn down_on_an_empty_line_with_a_list_moves_the_highlight() {
+        let mut p = submitted(&["quit"]);
+        assert!(!p.arrow(Toward::Next, 3));
+        assert_eq!((p.selected, p.input.as_str()), (1, ""));
+    }
+
+    #[test]
+    fn up_moves_the_highlight_back_to_the_top_before_it_recalls() {
+        let mut p = submitted(&["quit"]);
+        p.arrow(Toward::Next, 3);
+        p.arrow(Toward::Previous, 3);
+        assert_eq!((p.selected, p.input.as_str()), (0, ""));
+        p.arrow(Toward::Previous, 3);
+        assert_eq!(p.input, "quit");
+    }
+
+    #[test]
+    fn the_arrows_go_on_walking_the_history_once_it_started() {
+        let mut p = submitted(&["go !1", "quit"]);
+        p.arrow(Toward::Previous, 3);
+        p.arrow(Toward::Previous, 3);
+        assert_eq!(p.input, "go !1");
+        p.arrow(Toward::Next, 3);
+        assert_eq!(p.input, "quit");
+        assert!(p.arrow(Toward::Next, 3), "past the newest line the line empties");
+        assert_eq!((p.input.as_str(), p.walking_history()), ("", false));
+    }
+
+    #[test]
+    fn typing_on_a_recalled_line_gives_the_arrows_back_to_the_list() {
+        let mut p = submitted(&["quit"]);
+        p.arrow(Toward::Previous, 3);
+        p.type_char('s');
+        assert!(!p.arrow(Toward::Previous, 3));
+        assert_eq!(p.input, "quits");
+    }
+
+    #[test]
+    fn erasing_on_a_recalled_line_gives_the_arrows_back_to_the_list() {
+        let mut p = submitted(&["quit"]);
+        p.arrow(Toward::Previous, 3);
+        p.backspace();
+        assert!(!p.walking_history());
+    }
+
+    #[test]
+    fn up_on_a_typed_line_with_no_list_keeps_what_is_typed() {
+        let mut p = submitted(&["quit"]);
+        p.type_char('g');
+        assert!(!p.arrow(Toward::Previous, 0));
+        assert_eq!(p.input, "g");
+    }
+
+    #[test]
+    fn up_on_an_empty_line_with_nothing_submitted_changes_nothing() {
+        let mut p = submitted(&[]);
+        assert!(!p.arrow(Toward::Previous, 3));
+        assert_eq!((p.selected, p.input.as_str()), (0, ""));
+    }
+
+    #[test]
+    fn a_mode_that_takes_no_command_never_recalls() {
+        let mut p = Palette::new(Searching::Things, vec!["quit".to_owned()]);
+        assert!(!p.arrow(Toward::Previous, 3));
+        assert_eq!(p.input, "");
+    }
+
+    #[test]
+    fn tab_on_a_lone_name_waiting_for_a_value_goes_on_to_the_value() {
+        let mut p = typed("set ");
+        p.complete(&["theme=".to_owned()], Toward::Next);
+        assert_eq!(p.input, "set theme=");
+        p.complete(&["theme=nord".to_owned()], Toward::Next);
+        assert_eq!(p.input, "set theme=nord ");
+    }
+
+    #[test]
+    fn a_line_submitted_twice_in_a_row_is_remembered_once() {
+        let history = remembered(remembered(vec![], "quit"), "quit");
+        assert_eq!(history, ["quit"]);
+    }
+
+    #[test]
+    fn a_blank_line_is_not_remembered() {
+        assert_eq!(remembered(vec![], ""), Vec::<String>::new());
+    }
+
+    #[test]
+    fn tab_goes_on_cycling_over_several_names_waiting_for_a_value() {
+        let keys = vec!["theme=".to_owned(), "highlight=".to_owned()];
+        let mut p = typed("set ");
+        p.complete(&keys, Toward::Next);
+        p.complete(&keys, Toward::Next);
+        assert_eq!(p.input, "set highlight=");
+    }
+
+    #[test]
+    fn completing_leaves_the_highlight_at_the_top_and_ends_a_recall() {
+        let things = vec!["!42".to_owned()];
+        let mut p = submitted(&["go 4"]);
+        p.arrow(Toward::Previous, 3);
+        p.complete(&things, Toward::Next);
+        assert_eq!((p.selected, p.walking_history()), (0, false));
     }
 
     #[test]

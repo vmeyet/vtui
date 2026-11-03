@@ -70,11 +70,10 @@ pub fn prompt<M: Mode>(theme: &Theme, palette: &Palette<M>, sign: &str, completi
         Span::styled("▌", Style::default().fg(theme.accent)),
     ];
     if palette.mode.takes_commands() {
-        let candidates = completions(&palette.input);
-        match (palette.hint(), palette.ghost(&candidates)) {
-            (Some(hint), _) => spans.push(Span::styled(format!("   {hint}"), Style::default().fg(theme.muted))),
-            (None, Some(ghost)) => spans.push(Span::styled(ghost, Style::default().fg(theme.faded))),
-            (None, None) => {}
+        if let Some(hint) = palette.hint() {
+            spans.push(Span::styled(format!("   {hint}"), Style::default().fg(theme.muted)));
+        } else if let Some(ghost) = palette.ghost(&completions(&palette.input)) {
+            spans.push(Span::styled(ghost, Style::default().fg(theme.faded)));
         }
     }
     Line::from(spans)
