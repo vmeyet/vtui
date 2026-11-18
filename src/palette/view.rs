@@ -59,20 +59,25 @@ pub fn draw(f: &mut Frame<'_>, theme: &Theme, area: Rect, popup: Popup<'_>, list
 }
 
 /// `› text▌`, or `sign text▌` in a mode with a sign, then the options tab is cycling through or the ghost of a
-/// completion; `completions` gives the candidates for the line, and is only asked in a mode that takes commands.
+/// completion; a cursor inside the text is the whole character under it in reverse, a space when it has no width. `completions` gives the candidates
+/// for the line, and is only asked in a mode that takes commands, with the cursor at the end.
 pub fn prompt<M: Mode>(theme: &Theme, palette: &Palette<M>, sign: &str, completions: impl FnOnce(&str) -> Vec<String>) -> Line<'static> {
+    let accent = Style::default().fg(theme.accent);
+    let (before, under, after) = palette.field().split();
     let mut spans = vec![
-        Span::styled(
-            format!("{} ", if sign.is_empty() { "›" } else { sign }),
-            Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(palette.input.clone()),
-        Span::styled("▌", Style::default().fg(theme.accent)),
+        Span::styled(format!("{} ", if sign.is_empty() { "›" } else { sign }), accent.add_modifier(Modifier::BOLD)),
+        Span::raw(before.to_owned()),
     ];
+    if !palette.field().at_end() {
+        let cursor = if under.width() == 0 { " " } else { under };
+        spans.extend([Span::styled(cursor.to_owned(), accent.add_modifier(Modifier::REVERSED)), Span::raw(after.to_owned())]);
+        return Line::from(spans);
+    }
+    spans.push(Span::styled("▌", accent));
     if palette.mode.takes_commands() {
         if let Some(hint) = palette.hint() {
             spans.push(Span::styled(format!("   {hint}"), Style::default().fg(theme.muted)));
-        } else if let Some(ghost) = palette.ghost(&completions(&palette.input)) {
+        } else if let Some(ghost) = palette.ghost(&completions(palette.input())) {
             spans.push(Span::styled(ghost, Style::default().fg(theme.faded)));
         }
     }
@@ -130,7 +135,9 @@ pub fn verb_lines<M: Mode>(theme: &Theme, palette: &Palette<M>, verbs: &[Verb], 
 
 #[cfg(test)]
 mod tests {
+    use super::super::CommandLine;
     use super::*;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use unicode_width::UnicodeWidthStr;
@@ -169,6 +176,56 @@ mod tests {
             .chunks(buffer.area.width as usize)
             .map(|row| row.iter().map(ratatui::buffer::Cell::symbol).collect::<String>() + "\n")
             .collect()
+    }
+
+    fn prompt_after(text: &str, keys: &[KeyCode]) -> Line<'static> {
+        let mut palette = Palette::new(CommandLine, vec![]);
+        palette.type_str(text);
+        for code in keys {
+            palette.press(KeyEvent::new(*code, KeyModifiers::NONE));
+        }
+        prompt(&Theme::default(), &palette, "", |_| vec!["gone".to_owned()])
+    }
+
+    fn prompt_spans(left: usize) -> Vec<String> {
+        prompt_after("go", &vec![KeyCode::Left; left]).spans.iter().map(|span| span.content.to_string()).collect()
+    }
+
+    fn reversed(line: &Line<'_>) -> Vec<String> {
+        let cursor = line.spans.iter().filter(|span| span.style.add_modifier.contains(Modifier::REVERSED));
+        cursor.map(|span| span.content.to_string()).collect()
+    }
+
+    #[test]
+    fn the_prompt_ends_on_the_cursor_and_the_ghost_when_the_cursor_is_at_the_end() {
+        assert_eq!(prompt_spans(0), ["› ", "go", "▌", "ne"]);
+    }
+
+    #[test]
+    fn the_prompt_draws_a_cursor_inside_the_line_on_its_character_and_no_ghost() {
+        assert_eq!(prompt_spans(1), ["› ", "g", "o", ""]);
+    }
+
+    #[test]
+    fn the_character_under_the_cursor_is_drawn_in_reverse() {
+        assert_eq!(reversed(&prompt_after("go", &[KeyCode::Home])), ["g"]);
+    }
+
+    #[test]
+    fn a_cursor_on_a_letter_with_a_combining_accent_reverses_both() {
+        assert_eq!(reversed(&prompt_after("e\u{301}x", &[KeyCode::Home])), ["e\u{301}"]);
+    }
+
+    #[test]
+    fn a_cursor_on_a_character_with_no_width_is_a_reversed_space() {
+        assert_eq!(reversed(&prompt_after("\u{301}x", &[KeyCode::Home])), [" "]);
+    }
+
+    #[test]
+    fn the_line_keeps_its_width_as_the_cursor_walks_over_an_emoji_of_several_characters() {
+        let text = "a👨\u{200d}👩\u{200d}👧b";
+        let widths = [1, 2, 3].map(|left| prompt_after(text, &vec![KeyCode::Left; left]).width());
+        assert_eq!(widths, [widths[0]; 3]);
     }
 
     #[test]

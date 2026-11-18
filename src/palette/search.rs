@@ -3,6 +3,7 @@
 use super::{Mode, Palette};
 use crate::fuzzy;
 use crate::toward::Toward;
+use crossterm::event::KeyEvent;
 
 /// The only mode of a plain search: what is typed is matched, never read as a command.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -48,7 +49,7 @@ impl<T: Searched, M: Mode> Search<T, M> {
 
     /// Matches `all` against the line again, keeping the highlight inside the list.
     pub fn rank(&mut self, all: &[T]) {
-        let ranked = fuzzy::rank(&self.palette.input, all.iter().map(|item| (item.search_text(), item)));
+        let ranked = fuzzy::rank(self.palette.input(), all.iter().map(|item| (item.search_text(), item)));
         self.shown = ranked.into_iter().map(|(_, item)| item.clone()).collect();
         self.palette.move_by(0, self.shown.len());
     }
@@ -57,6 +58,15 @@ impl<T: Searched, M: Mode> Search<T, M> {
     pub fn paste(&mut self, text: &str, all: &[T]) {
         self.palette.type_str(text);
         self.rank(all);
+    }
+
+    /// Applies an editing key as [`Palette::press`] does, and ranks again when it changed the line or the mode.
+    pub fn press(&mut self, key: KeyEvent, all: &[T]) {
+        let before = (self.palette.mode, self.palette.field().revision());
+        self.palette.press(key);
+        if (self.palette.mode, self.palette.field().revision()) != before {
+            self.rank(all);
+        }
     }
 
     /// `↑` or `↓`, as [`Palette::arrow`] says; a line recalled narrows the list too.
@@ -87,6 +97,7 @@ impl<T: Searched, M: Mode> Search<T, M> {
 mod tests {
     use super::super::CommandLine;
     use super::*;
+    use crossterm::event::{KeyCode, KeyModifiers};
 
     #[derive(Clone, Debug, PartialEq)]
     struct Table(&'static str);
@@ -120,7 +131,7 @@ mod tests {
     fn a_shorter_list_keeps_the_highlight_inside_it() {
         let mut search = Search::<Table>::new(&TABLES);
         search.palette.move_by(2, 3);
-        search.palette.input = "cust".into();
+        search.palette.set_input("cust");
         search.rank(&TABLES);
         assert_eq!(search.selected(), Some(&Table("customers")));
     }
@@ -130,6 +141,50 @@ mod tests {
         let mut search = Search::<Table>::new(&TABLES);
         search.paste("customers\n", &TABLES);
         assert_eq!(search.shown, [Table("customers")]);
+    }
+
+    #[test]
+    fn a_key_that_edits_inside_the_line_narrows_the_list() {
+        let mut search = searched("ordrs");
+        for code in [KeyCode::Left, KeyCode::Left, KeyCode::Char('e')] {
+            search.press(KeyEvent::new(code, KeyModifiers::NONE), &TABLES);
+        }
+        assert_eq!((search.palette.input(), search.shown.first()), ("orders", Some(&Table("orders"))));
+    }
+
+    /// Tables by default, commands after a `>`.
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    enum Finding {
+        #[default]
+        Tables,
+        Commands,
+    }
+
+    impl Mode for Finding {
+        fn switched_by(self, first: char) -> Option<Self> {
+            (self == Self::Tables && first == '>').then_some(Self::Commands)
+        }
+
+        fn takes_commands(self) -> bool {
+            self == Self::Commands
+        }
+    }
+
+    fn stale_after(start: Finding, code: KeyCode) -> Search<Table, Finding> {
+        let mut search = Search::with_palette(Palette::new(start, vec![]), &TABLES);
+        search.shown.clear();
+        search.press(KeyEvent::new(code, KeyModifiers::NONE), &TABLES);
+        search
+    }
+
+    #[test]
+    fn a_key_that_switches_the_mode_ranks_the_list_again() {
+        assert_eq!(stale_after(Finding::Tables, KeyCode::Char('>')).shown, TABLES);
+    }
+
+    #[test]
+    fn a_backspace_that_steps_back_to_the_default_mode_ranks_the_list_again() {
+        assert_eq!(stale_after(Finding::Commands, KeyCode::Backspace).shown, TABLES);
     }
 
     #[test]
@@ -148,7 +203,7 @@ mod tests {
     fn a_plain_search_never_recalls_a_line() {
         let mut search = Search::with_palette(Palette::new(PlainSearch, vec!["orders".to_owned()]), &TABLES);
         search.arrow(Toward::Previous, &TABLES);
-        assert_eq!((search.palette.input.as_str(), search.shown.len()), ("", 3));
+        assert_eq!((search.palette.input(), search.shown.len()), ("", 3));
     }
 
     #[test]
