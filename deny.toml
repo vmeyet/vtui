@@ -3,6 +3,9 @@ all-features = true
 
 [advisories]
 version = 2
+ignore = [
+  { id = "RUSTSEC-2026-0543", reason = "chrono is flagged unmaintained, not vulnerable; the usage module takes and returns its NaiveDate, so leaving it changes the API the apps build on" },
+]
 
 [licenses]
 version = 2
