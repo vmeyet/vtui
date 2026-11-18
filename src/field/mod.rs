@@ -6,6 +6,10 @@ use std::fmt;
 use std::ops::Range;
 use unicode_width::UnicodeWidthChar as _;
 
+mod keys;
+
+pub use keys::adds_a_line;
+
 /// A line of text being typed, or several, with the cursor in it.
 #[derive(Clone, Default)]
 pub struct Field {
@@ -79,7 +83,8 @@ impl Field {
         std::mem::take(&mut self.text)
     }
 
-    fn at_end(&self) -> bool {
+    /// Whether the cursor sits after the last character, where a completion or its ghost applies.
+    pub fn at_end(&self) -> bool {
         self.cursor == self.text.len()
     }
 

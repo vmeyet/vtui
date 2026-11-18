@@ -1,9 +1,12 @@
 //! The palette, `ctrl-k` or `⌘k`: one line that finds things or runs commands, picked by the first character as
 //! VS Code does. The app names its modes and parses the line; the palette keeps what is typed, the highlighted
-//! row, the history, and tab completion with a ghost suggestion.
+//! row, the history, and tab completion with a ghost suggestion. The line has a cursor; completion and its ghost
+//! only apply while the cursor sits at the end of the line.
 use crate::complete::{self, Cycle, Ghost};
+use crate::field::{self, Field};
+use crate::fuzzy;
 use crate::toward::Toward;
-use crate::{field, fuzzy};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 pub mod search;
 pub mod typed;
@@ -61,8 +64,7 @@ pub fn verbs_for(input: &str, verbs: impl IntoIterator<Item = Verb>) -> Vec<Verb
 pub struct Palette<M> {
     /// What it searches now.
     pub mode: M,
-    /// What is typed after the mode's character.
-    pub input: String,
+    input: Field,
     /// The highlighted row of the list.
     pub selected: usize,
     /// The lines submitted before, oldest first.
@@ -81,13 +83,61 @@ struct Cycling {
 impl<M: Mode> Palette<M> {
     /// Opens on `mode`, with the lines submitted before to recall.
     pub fn new(mode: M, history: Vec<String>) -> Self {
-        Self { mode, input: String::new(), selected: 0, history, history_at: None, cycle: None }
+        Self { mode, input: Field::default(), selected: 0, history, history_at: None, cycle: None }
     }
 
-    /// A first character the mode switches on changes the mode instead of being typed.
+    /// What is typed after the mode's character.
+    pub fn input(&self) -> &str {
+        self.input.text()
+    }
+
+    /// The typed line with its cursor: what a view draws, and where an app asks whether the cursor is at the end.
+    pub fn field(&self) -> &Field {
+        &self.input
+    }
+
+    /// Replaces what is typed with `line`, the cursor after it.
+    pub fn set_input(&mut self, line: &str) {
+        self.write(line);
+        self.after_typing();
+    }
+
+    /// Writes `line` over the field in place, so its revision keeps growing.
+    fn write(&mut self, line: &str) {
+        self.input.take();
+        self.input.insert_str(line);
+    }
+
+    /// Applies an editing key to the line, as [`Field::press_on_one_line`] reads it: a character goes through
+    /// [`Palette::type_char`] and `backspace` through [`Palette::backspace`], whose answer an app that closes on it
+    /// asks first. `↑`, `↓`, `enter` and `tab` stay with the app.
+    pub fn press(&mut self, key: KeyEvent) {
+        let plain = !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
+        match key.code {
+            KeyCode::Char(c) if plain => self.type_char(c),
+            KeyCode::Backspace if plain => {
+                self.backspace();
+            }
+            _ => self.move_or_delete(key),
+        }
+    }
+
+    /// A key that changes the line ends a recall as typing does; one that only moves the cursor off the end ends
+    /// the tab cycle, which completes the end of the line.
+    fn move_or_delete(&mut self, key: KeyEvent) {
+        let revision = self.input.revision();
+        self.input.press_on_one_line(key);
+        if self.input.revision() != revision {
+            self.after_typing();
+        } else if !self.input.at_end() {
+            self.cycle = None;
+        }
+    }
+
+    /// Types `c` at the cursor; a first character the mode switches on changes the mode instead of being typed.
     pub fn type_char(&mut self, c: char) {
         if !self.switch_on(c) {
-            self.input.push(c);
+            self.input.insert(c);
         }
         self.after_typing();
     }
@@ -95,8 +145,6 @@ impl<M: Mode> Palette<M> {
     /// Types pasted text as [`Palette::type_char`] types each character, cleaned as [`Field::paste`] cleans it,
     /// with a newline turned into a space since the line is one line, and the blank space around it dropped
     /// so a copied `orders\n` still matches.
-    ///
-    /// [`Field::paste`]: crate::field::Field::paste
     pub fn type_str(&mut self, text: &str) {
         let cleaned = field::clean_paste(text).replace('\n', " ");
         let line = cleaned.trim();
@@ -104,13 +152,13 @@ impl<M: Mode> Palette<M> {
             Some(first) if self.switch_on(first) => &line[first.len_utf8()..],
             _ => line,
         };
-        self.input.push_str(rest);
+        self.input.insert_str(rest);
         self.after_typing();
     }
 
     /// Switches to the mode `first` picks, when it is typed on an empty line; whether it did.
     fn switch_on(&mut self, first: char) -> bool {
-        let Some(mode) = self.mode.switched_by(first).filter(|_| self.input.is_empty()) else { return false };
+        let Some(mode) = self.mode.switched_by(first).filter(|_| self.input.text().is_empty()) else { return false };
         self.mode = mode;
         true
     }
@@ -121,11 +169,12 @@ impl<M: Mode> Palette<M> {
         self.history_at = None;
     }
 
-    /// Erases a character; on an empty line it steps back to the default mode first. `false` once there is
-    /// nothing left to erase, which closes the palette.
+    /// Erases the character before the cursor; on an empty line it steps back to the default mode first. `false`
+    /// once the line is empty in the default mode, which closes the palette.
     pub fn backspace(&mut self) -> bool {
         self.after_typing();
-        if self.input.pop().is_some() {
+        if !self.input.text().is_empty() {
+            self.input.backspace();
             return true;
         }
         let stepped = self.mode != M::default();
@@ -135,7 +184,7 @@ impl<M: Mode> Palette<M> {
 
     /// Still on the command's name: `↑ ↓` walk the list of commands, not the arguments.
     pub fn naming_command(&self) -> bool {
-        self.mode.takes_commands() && !self.input.contains(char::is_whitespace)
+        self.mode.takes_commands() && !self.input.text().contains(char::is_whitespace)
     }
 
     /// `↑` or `↓`, the rule every app's palette shares: the highlight moves in the `listed` rows that show, 0 when none does.
@@ -158,7 +207,7 @@ impl<M: Mode> Palette<M> {
     }
 
     fn can_start_recalling(&self) -> bool {
-        self.mode.takes_commands() && self.input.is_empty() && self.selected == 0 && !self.history.is_empty()
+        self.mode.takes_commands() && self.input.text().is_empty() && self.selected == 0 && !self.history.is_empty()
     }
 
     /// Moves the highlight in a list of `len` rows, staying inside it.
@@ -166,39 +215,43 @@ impl<M: Mode> Palette<M> {
         self.selected = if len == 0 { 0 } else { self.selected.saturating_add_signed(delta).min(len - 1) };
     }
 
-    /// Replaces the token being typed with the next candidate for its slot.
+    /// Replaces the token being typed with the next candidate for its slot; nothing unless the cursor is at the end.
     pub fn complete(&mut self, candidates: &[String], toward: Toward) {
+        if !self.input.at_end() {
+            return;
+        }
         let cycling = if let Some(mut cycling) = self.cycle.take() {
             cycling.cycle.advance(toward);
             cycling
         } else {
-            let (prefix, token) = split_last_token(&self.input);
+            let (prefix, token) = split_last_token(self.input.text());
             let Some(cycle) = Cycle::new(token, candidates) else { return };
             Cycling { prefix: prefix.to_owned(), cycle }
         };
-        self.input = completed(&cycling.prefix, cycling.cycle.current());
+        self.write(&completed(&cycling.prefix, cycling.cycle.current()));
         self.after_typing();
         self.cycle = (!cycling.cycle.is_alone()).then_some(cycling);
     }
 
-    /// The grey rest of the best completion for the token being typed, as a shell shows it.
+    /// The grey rest of the best completion for the token being typed, as a shell shows it; none unless the cursor
+    /// is at the end.
     pub fn ghost(&self, candidates: &[String]) -> Option<String> {
         Some(self.best_ghost(candidates)?.rest)
     }
 
-    /// Accepts the ghost, as `→` does in a shell: the token becomes the candidate as spelled in the list.
+    /// Accepts the ghost, as `→` does in a shell at the end of the line: the token becomes the candidate as spelled
+    /// in the list. Nothing when no ghost shows.
     pub fn accept(&mut self, candidates: &[String]) {
         let Some(ghost) = self.best_ghost(candidates) else { return };
-        let (prefix, _) = split_last_token(&self.input);
-        self.input = completed(prefix, &ghost.name);
-        self.after_typing();
+        let (prefix, _) = split_last_token(self.input.text());
+        self.set_input(&completed(prefix, &ghost.name));
     }
 
     fn best_ghost(&self, candidates: &[String]) -> Option<Ghost> {
-        if self.cycle.is_some() {
+        if self.cycle.is_some() || !self.input.at_end() {
             return None;
         }
-        let (_, token) = split_last_token(&self.input);
+        let (_, token) = split_last_token(self.input.text());
         complete::ghost(token, candidates)
     }
 
@@ -213,9 +266,7 @@ impl<M: Mode> Palette<M> {
             return;
         }
         let at = self.history_at.map_or(self.history.len() - 1, |i| i.saturating_sub(1));
-        self.after_typing();
-        self.history_at = Some(at);
-        self.input.clone_from(&self.history[at]);
+        self.recall(at);
     }
 
     /// Recalls the line submitted after the one shown, or an empty line past the last.
@@ -223,16 +274,22 @@ impl<M: Mode> Palette<M> {
         let Some(at) = self.history_at else { return };
         self.after_typing();
         if at + 1 >= self.history.len() {
-            self.input.clear();
+            self.input.take();
         } else {
-            self.history_at = Some(at + 1);
-            self.input.clone_from(&self.history[at + 1]);
+            self.recall(at + 1);
         }
+    }
+
+    /// Shows the line submitted at `at`, the cursor after it.
+    fn recall(&mut self, at: usize) {
+        let line = self.history[at].clone();
+        self.set_input(&line);
+        self.history_at = Some(at);
     }
 
     /// Takes the line, remembers it, and leaves the palette empty for the next command.
     pub fn submit(&mut self) -> String {
-        let line = std::mem::take(&mut self.input).trim().to_owned();
+        let line = self.input.take().trim().to_owned();
         self.history = remembered(std::mem::take(&mut self.history), &line);
         self.history_at = None;
         self.cycle = None;
@@ -292,20 +349,154 @@ mod tests {
         p
     }
 
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn alt(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::ALT)
+    }
+
+    fn pressed(text: &str, keys: &[KeyEvent]) -> Palette<Searching> {
+        let mut p = typed(text);
+        for key in keys {
+            p.press(*key);
+        }
+        p
+    }
+
+    /// The line with the cursor drawn in it.
+    fn shown(p: &Palette<Searching>) -> String {
+        let (before, under, after) = p.field().split();
+        format!("{before}|{under}{after}")
+    }
+
+    fn words() -> Vec<String> {
+        VERBS.iter().map(|verb| verb.word.to_owned()).collect()
+    }
+
+    #[test]
+    fn the_arrows_move_the_cursor_by_character() {
+        assert_eq!(shown(&pressed("go !42", &[key(KeyCode::Left), key(KeyCode::Left)])), "go !|42");
+        assert_eq!(shown(&pressed("go !42", &[key(KeyCode::Left), key(KeyCode::Left), key(KeyCode::Right)])), "go !4|2");
+    }
+
+    #[test]
+    fn alt_and_the_arrows_move_the_cursor_by_word() {
+        assert_eq!(shown(&pressed("go !42 now", &[alt(KeyCode::Left), alt(KeyCode::Left)])), "go |!42 now");
+        assert_eq!(shown(&pressed("go !42 now", &[key(KeyCode::Home), alt(KeyCode::Right)])), "go| !42 now");
+    }
+
+    #[test]
+    fn home_and_end_jump_to_the_ends_of_the_line() {
+        assert_eq!(shown(&pressed("go !42", &[key(KeyCode::Home)])), "|go !42");
+        assert_eq!(shown(&pressed("go !42", &[key(KeyCode::Home), key(KeyCode::End)])), "go !42|");
+    }
+
+    #[test]
+    fn a_character_is_typed_where_the_cursor_is() {
+        assert_eq!(shown(&pressed("go !2", &[key(KeyCode::Left), key(KeyCode::Char('4'))])), "go !4|2");
+    }
+
+    #[test]
+    fn a_paste_lands_where_the_cursor_is() {
+        let mut p = pressed("go now", &[alt(KeyCode::Left)]);
+        p.type_str("!42");
+        assert_eq!(shown(&p), "go !42|now");
+    }
+
+    #[test]
+    fn backspace_erases_the_character_before_a_cursor_inside_the_line() {
+        assert_eq!(shown(&pressed("go !42", &[key(KeyCode::Left), key(KeyCode::Backspace)])), "go !|2");
+    }
+
+    #[test]
+    fn delete_erases_the_character_under_the_cursor() {
+        assert_eq!(shown(&pressed("go !42", &[key(KeyCode::Left), key(KeyCode::Delete)])), "go !4|");
+    }
+
+    #[test]
+    fn alt_backspace_deletes_the_word_before_the_cursor() {
+        assert_eq!(shown(&pressed("go !42 now", &[alt(KeyCode::Left), alt(KeyCode::Backspace)])), "go |now");
+    }
+
+    #[test]
+    fn backspace_at_the_start_of_a_typed_line_keeps_the_palette_open() {
+        let mut p = pressed("go", &[key(KeyCode::Home)]);
+        assert!(p.backspace());
+        assert_eq!((p.mode, shown(&p).as_str()), (Searching::Commands, "|go"));
+    }
+
+    #[test]
+    fn a_pressed_character_switches_the_mode_as_a_typed_one_does() {
+        let mut p = Palette::<Searching>::default();
+        p.press(key(KeyCode::Char('>')));
+        assert_eq!((p.mode, p.input()), (Searching::Commands, ""));
+    }
+
+    #[test]
+    fn a_pressed_backspace_on_an_empty_line_steps_back_to_the_default_mode() {
+        assert_eq!(pressed("", &[key(KeyCode::Backspace)]).mode, Searching::Things);
+    }
+
+    #[test]
+    fn no_ghost_shows_while_the_cursor_is_inside_the_line() {
+        assert_eq!(pressed("pu", &[key(KeyCode::Left)]).ghost(&words()), None);
+    }
+
+    #[test]
+    fn accepting_with_the_cursor_inside_the_line_changes_nothing() {
+        let mut p = pressed("pu", &[key(KeyCode::Left)]);
+        p.accept(&words());
+        assert_eq!(shown(&p), "p|u");
+    }
+
+    #[test]
+    fn tab_with_the_cursor_inside_the_line_changes_nothing() {
+        let mut p = pressed("pu", &[key(KeyCode::Left)]);
+        p.complete(&words(), Toward::Next);
+        assert_eq!((shown(&p).as_str(), p.hint()), ("p|u", None));
+    }
+
+    #[test]
+    fn moving_the_cursor_off_the_end_ends_the_tab_cycle() {
+        let things = vec!["!42".to_owned(), "!41".to_owned()];
+        let mut p = typed("go 4");
+        p.complete(&things, Toward::Next);
+        p.press(key(KeyCode::Left));
+        assert_eq!(p.hint(), None);
+    }
+
+    #[test]
+    fn moving_the_cursor_on_a_recalled_line_keeps_the_recall() {
+        let mut p = submitted(&["quit"]);
+        p.arrow(Toward::Previous, 3);
+        p.press(key(KeyCode::Left));
+        assert!(p.walking_history());
+    }
+
+    #[test]
+    fn deleting_inside_a_recalled_line_ends_the_recall() {
+        let mut p = submitted(&["go !42"]);
+        p.arrow(Toward::Previous, 3);
+        p.press(alt(KeyCode::Backspace));
+        assert_eq!((p.input(), p.walking_history()), ("go ", false));
+    }
+
     #[test]
     fn tab_cycles_and_the_ghost_suggests() {
         let words: Vec<String> = VERBS.iter().map(|verb| verb.word.to_owned()).collect();
         let mut p = typed("pu");
         assert_eq!(p.ghost(&words).as_deref(), Some("blish"));
         p.accept(&words);
-        assert_eq!(p.input, "publish ");
+        assert_eq!(p.input(), "publish ");
         let things = vec!["!42".to_owned(), "!41".to_owned()];
         let mut p = typed("go 4");
         p.complete(&things, Toward::Next);
-        assert_eq!(p.input, "go !42 ");
+        assert_eq!(p.input(), "go !42 ");
         assert!(p.hint().unwrap().starts_with("[!42]"));
         p.complete(&things, Toward::Next);
-        assert_eq!(p.input, "go !41 ");
+        assert_eq!(p.input(), "go !41 ");
     }
 
     #[test]
@@ -314,21 +505,21 @@ mod tests {
         let mut p = typed("go ord");
         assert_eq!(p.ghost(&tables).as_deref(), Some("ers"));
         p.accept(&tables);
-        assert_eq!(p.input, "go Orders ");
+        assert_eq!(p.input(), "go Orders ");
     }
 
     #[test]
     fn the_first_character_picks_the_mode_and_backspace_steps_back() {
         let mut p = Palette::<Searching>::default();
         p.type_char('>');
-        assert_eq!((p.mode, p.input.as_str()), (Searching::Commands, ""));
+        assert_eq!((p.mode, p.input()), (Searching::Commands, ""));
         p.type_char('>');
-        assert_eq!(p.input, ">", "only the first character switches");
+        assert_eq!(p.input(), ">", "only the first character switches");
         assert!(p.backspace() && p.backspace());
         assert_eq!(p.mode, Searching::Things, "an empty line steps back to the default mode");
         assert!(!p.backspace(), "nothing left: the palette closes");
         p.type_char('/');
-        assert_eq!((p.mode, p.input.as_str()), (Searching::Things, "/"), "a slash is typed like any letter");
+        assert_eq!((p.mode, p.input()), (Searching::Things, "/"), "a slash is typed like any letter");
     }
 
     #[test]
@@ -354,15 +545,15 @@ mod tests {
     fn history_recall() {
         let mut p = typed("go !1");
         assert_eq!(p.submit(), "go !1");
-        p.input = "quit".into();
+        p.set_input("quit");
         p.submit();
         p.history_up();
-        assert_eq!(p.input, "quit");
+        assert_eq!(p.input(), "quit");
         p.history_up();
-        assert_eq!(p.input, "go !1");
+        assert_eq!(p.input(), "go !1");
         p.history_down();
         p.history_down();
-        assert_eq!(p.input, "");
+        assert_eq!(p.input(), "");
     }
 
     fn submitted(lines: &[&str]) -> Palette<Searching> {
@@ -373,14 +564,14 @@ mod tests {
     fn up_on_an_empty_line_with_a_list_recalls_the_last_line() {
         let mut p = submitted(&["go !1", "quit"]);
         assert!(p.arrow(Toward::Previous, 3));
-        assert_eq!(p.input, "quit");
+        assert_eq!(p.input(), "quit");
     }
 
     #[test]
     fn down_on_an_empty_line_with_a_list_moves_the_highlight() {
         let mut p = submitted(&["quit"]);
         assert!(!p.arrow(Toward::Next, 3));
-        assert_eq!((p.selected, p.input.as_str()), (1, ""));
+        assert_eq!((p.selected, p.input()), (1, ""));
     }
 
     #[test]
@@ -388,9 +579,9 @@ mod tests {
         let mut p = submitted(&["quit"]);
         p.arrow(Toward::Next, 3);
         p.arrow(Toward::Previous, 3);
-        assert_eq!((p.selected, p.input.as_str()), (0, ""));
+        assert_eq!((p.selected, p.input()), (0, ""));
         p.arrow(Toward::Previous, 3);
-        assert_eq!(p.input, "quit");
+        assert_eq!(p.input(), "quit");
     }
 
     #[test]
@@ -398,11 +589,11 @@ mod tests {
         let mut p = submitted(&["go !1", "quit"]);
         p.arrow(Toward::Previous, 3);
         p.arrow(Toward::Previous, 3);
-        assert_eq!(p.input, "go !1");
+        assert_eq!(p.input(), "go !1");
         p.arrow(Toward::Next, 3);
-        assert_eq!(p.input, "quit");
+        assert_eq!(p.input(), "quit");
         assert!(p.arrow(Toward::Next, 3), "past the newest line the line empties");
-        assert_eq!((p.input.as_str(), p.walking_history()), ("", false));
+        assert_eq!((p.input(), p.walking_history()), ("", false));
     }
 
     #[test]
@@ -411,7 +602,7 @@ mod tests {
         p.arrow(Toward::Previous, 3);
         p.type_char('s');
         assert!(!p.arrow(Toward::Previous, 3));
-        assert_eq!(p.input, "quits");
+        assert_eq!(p.input(), "quits");
     }
 
     #[test]
@@ -427,30 +618,30 @@ mod tests {
         let mut p = submitted(&["quit"]);
         p.type_char('g');
         assert!(!p.arrow(Toward::Previous, 0));
-        assert_eq!(p.input, "g");
+        assert_eq!(p.input(), "g");
     }
 
     #[test]
     fn up_on_an_empty_line_with_nothing_submitted_changes_nothing() {
         let mut p = submitted(&[]);
         assert!(!p.arrow(Toward::Previous, 3));
-        assert_eq!((p.selected, p.input.as_str()), (0, ""));
+        assert_eq!((p.selected, p.input()), (0, ""));
     }
 
     #[test]
     fn a_mode_that_takes_no_command_never_recalls() {
         let mut p = Palette::new(Searching::Things, vec!["quit".to_owned()]);
         assert!(!p.arrow(Toward::Previous, 3));
-        assert_eq!(p.input, "");
+        assert_eq!(p.input(), "");
     }
 
     #[test]
     fn tab_on_a_lone_name_waiting_for_a_value_goes_on_to_the_value() {
         let mut p = typed("set ");
         p.complete(&["theme=".to_owned()], Toward::Next);
-        assert_eq!(p.input, "set theme=");
+        assert_eq!(p.input(), "set theme=");
         p.complete(&["theme=nord".to_owned()], Toward::Next);
-        assert_eq!(p.input, "set theme=nord ");
+        assert_eq!(p.input(), "set theme=nord ");
     }
 
     #[test]
@@ -470,7 +661,7 @@ mod tests {
         let mut p = typed("set ");
         p.complete(&keys, Toward::Next);
         p.complete(&keys, Toward::Next);
-        assert_eq!(p.input, "set highlight=");
+        assert_eq!(p.input(), "set highlight=");
     }
 
     #[test]
@@ -486,7 +677,7 @@ mod tests {
     fn a_paste_on_an_empty_line_switches_the_mode_on_its_first_character() {
         let mut p = Palette::<Searching>::default();
         p.type_str(">go");
-        assert_eq!((p.mode, p.input.as_str()), (Searching::Commands, "go"));
+        assert_eq!((p.mode, p.input()), (Searching::Commands, "go"));
     }
 
     #[test]
@@ -494,21 +685,21 @@ mod tests {
         let mut p = Palette::<Searching>::default();
         p.type_char('a');
         p.type_str(">go");
-        assert_eq!((p.mode, p.input.as_str()), (Searching::Things, "a>go"));
+        assert_eq!((p.mode, p.input()), (Searching::Things, "a>go"));
     }
 
     #[test]
     fn a_paste_turns_newlines_into_spaces_and_drops_controls() {
         let mut p = typed("go ");
         p.type_str("acme/widgets\r\n!42\n\t\u{1b}x");
-        assert_eq!(p.input, "go acme/widgets !42     x");
+        assert_eq!(p.input(), "go acme/widgets !42     x");
     }
 
     #[test]
     fn a_paste_drops_the_blank_space_around_it() {
         let mut p = Palette::<Searching>::default();
         p.type_str(" \t orders  list\r\n");
-        assert_eq!(p.input, "orders  list");
+        assert_eq!(p.input(), "orders  list");
     }
 
     #[test]
