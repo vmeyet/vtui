@@ -15,9 +15,10 @@ impl Field {
         }
     }
 
-    /// Applies `key` as a box of one line reads it: `←` `→` by character, `⌥←` `⌥→` or `alt-b` `alt-f` by word,
-    /// `home` `end` or `ctrl-a` `ctrl-e` to the ends, `backspace` and `delete`, `⌥⌫` or `ctrl-w` for a word, and a
-    /// character typed at the cursor. It never adds a line, and leaves `↑`, `↓`, `enter` and `tab` to the app.
+    /// Applies `key` as a box of one line reads it, with the keys of a shell line: `←` `→` by character, `⌥←` `⌥→` or
+    /// `alt-b` `alt-f` by word, `home` `end` or `ctrl-a` `ctrl-e` to the ends of the cursor's line, `backspace` and
+    /// `delete`, `⌥⌫` or `ctrl-w` for a word, `ctrl-k` and `ctrl-u` to the ends of the line, and a character typed
+    /// at the cursor. It never adds a line, and leaves `↑`, `↓`, `enter` and `tab` to the app.
     pub fn press_on_one_line(&mut self, key: KeyEvent) {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let alt = key.modifiers.contains(KeyModifiers::ALT);
@@ -27,14 +28,16 @@ impl Field {
             KeyCode::Backspace if alt => self.delete_word(),
             KeyCode::Left => self.left(),
             KeyCode::Right => self.right(),
-            KeyCode::Home => self.start(),
-            KeyCode::End => self.end(),
-            KeyCode::Char('a') if ctrl => self.start(),
-            KeyCode::Char('e') if ctrl => self.end(),
+            KeyCode::Home => self.line_start(),
+            KeyCode::End => self.line_end(),
+            KeyCode::Char('a') if ctrl => self.line_start(),
+            KeyCode::Char('e') if ctrl => self.line_end(),
             KeyCode::Char('w') if ctrl => self.delete_word(),
+            KeyCode::Char('k') if ctrl => self.delete_to_line_end(),
+            KeyCode::Char('u') if ctrl => self.delete_to_line_start(),
             KeyCode::Backspace => self.backspace(),
             KeyCode::Delete => self.delete(),
-            KeyCode::Char(c) if !ctrl => self.insert(c),
+            KeyCode::Char(c) if !ctrl && !c.is_control() => self.insert(c),
             _ => {}
         }
     }
@@ -141,6 +144,31 @@ mod tests {
     #[test]
     fn ctrl_a_and_ctrl_e_jump_to_the_ends() {
         assert_eq!(line_after("fix", &[ctrl('a'), key('x'), ctrl('e'), key('y')]), "xfixy");
+    }
+
+    #[test]
+    fn ctrl_a_and_ctrl_e_stay_on_the_cursor_s_line_in_a_box_of_several() {
+        assert_eq!(text_after("fix\nthe bug", &[ctrl('a'), key('x'), ctrl('e'), key('y')]), "fix\nxthe bugy");
+    }
+
+    #[test]
+    fn home_and_end_stay_on_the_cursor_s_line_in_a_box_of_several() {
+        assert_eq!(text_after("fix\nthe bug", &[code(KeyCode::Home), key('x'), code(KeyCode::End), key('y')]), "fix\nxthe bugy");
+    }
+
+    #[test]
+    fn ctrl_k_deletes_from_the_cursor_to_the_end_of_its_line() {
+        assert_eq!(text_after("fix the\nbug", &[code(KeyCode::Up), ctrl('k')]), "fix\nbug");
+    }
+
+    #[test]
+    fn ctrl_u_deletes_from_the_start_of_the_cursor_s_line_to_the_cursor() {
+        assert_eq!(text_after("fix\nthe bug", &[alt(KeyCode::Left), ctrl('u')]), "fix\nbug");
+    }
+
+    #[test]
+    fn a_box_of_one_line_types_no_control_character() {
+        assert_eq!(line_after("fix", &[key('\n'), key('\u{1b}'), key('x')]), "fixx");
     }
 
     #[test]
