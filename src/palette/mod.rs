@@ -112,21 +112,23 @@ impl<M: Mode> Palette<M> {
     /// [`Palette::type_char`] and `backspace` through [`Palette::backspace`], whose answer an app that closes on it
     /// asks first. `↑`, `↓`, `enter` and `tab` stay with the app.
     pub fn press(&mut self, key: KeyEvent) {
-        let plain = !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
         match key.code {
-            KeyCode::Char(c) if plain => self.type_char(c),
-            KeyCode::Backspace if plain => {
+            KeyCode::Char('b' | 'f') if alt => self.edit(|line| line.press_on_one_line(key)),
+            KeyCode::Char(c) if !ctrl && !c.is_control() => self.type_char(c),
+            KeyCode::Backspace if !ctrl && !alt => {
                 self.backspace();
             }
-            _ => self.move_or_delete(key),
+            _ => self.edit(|line| line.press_on_one_line(key)),
         }
     }
 
-    /// A key that changes the line ends a recall as typing does; one that only moves the cursor off the end ends
-    /// the tab cycle, which completes the end of the line.
-    fn move_or_delete(&mut self, key: KeyEvent) {
+    /// An edit that changes the line ends a recall as typing does; one that only moves the cursor off the end ends
+    /// the tab cycle, which completes the end of the line; one that does nothing changes nothing.
+    fn edit(&mut self, edit: impl FnOnce(&mut Field)) {
         let revision = self.input.revision();
-        self.input.press_on_one_line(key);
+        edit(&mut self.input);
         if self.input.revision() != revision {
             self.after_typing();
         } else if !self.input.at_end() {
@@ -170,15 +172,18 @@ impl<M: Mode> Palette<M> {
     }
 
     /// Erases the character before the cursor; on an empty line it steps back to the default mode first. `false`
-    /// once the line is empty in the default mode, which closes the palette.
+    /// once the line is empty in the default mode, which closes the palette. With nothing before the cursor of a
+    /// typed line it changes nothing, the highlight and a recall included.
     pub fn backspace(&mut self) -> bool {
-        self.after_typing();
         if !self.input.text().is_empty() {
-            self.input.backspace();
+            self.edit(Field::backspace);
             return true;
         }
         let stepped = self.mode != M::default();
-        self.mode = M::default();
+        if stepped {
+            self.mode = M::default();
+            self.after_typing();
+        }
         stepped
     }
 
@@ -306,8 +311,8 @@ pub fn remembered(mut history: Vec<String>, line: &str) -> Vec<String> {
 }
 
 fn split_last_token(input: &str) -> (&str, &str) {
-    match input.rfind(char::is_whitespace) {
-        Some(i) => (&input[..=i], &input[i + 1..]),
+    match input.char_indices().rfind(|(_, c)| c.is_whitespace()) {
+        Some((i, space)) => input.split_at(i + space.len_utf8()),
         None => ("", input),
     }
 }
@@ -425,6 +430,38 @@ mod tests {
         let mut p = pressed("go", &[key(KeyCode::Home)]);
         assert!(p.backspace());
         assert_eq!((p.mode, shown(&p).as_str()), (Searching::Commands, "|go"));
+    }
+
+    #[test]
+    fn backspace_with_nothing_before_the_cursor_keeps_the_highlight_and_the_recall() {
+        let mut p = submitted(&["quit"]);
+        p.arrow(Toward::Previous, 3);
+        p.press(key(KeyCode::Home));
+        p.move_by(2, 3);
+        p.backspace();
+        assert_eq!((p.selected, p.walking_history()), (2, true));
+    }
+
+    #[test]
+    fn alt_with_the_character_of_a_mode_switches_the_mode() {
+        let mut p = Palette::<Searching>::default();
+        p.press(alt(KeyCode::Char('>')));
+        assert_eq!((p.mode, p.input()), (Searching::Commands, ""));
+    }
+
+    #[test]
+    fn a_pressed_control_character_is_not_typed() {
+        assert_eq!(pressed("go", &[key(KeyCode::Char('\n'))]).input(), "go");
+    }
+
+    #[test]
+    fn a_wide_space_before_the_token_being_typed_is_no_crash() {
+        for space in ['\u{a0}', '\u{3000}'] {
+            let mut p = typed(&format!("go{space}pu"));
+            assert_eq!(p.ghost(&words()).as_deref(), Some("blish"), "{space:?}");
+            p.accept(&words());
+            assert_eq!(p.input(), format!("go{space}publish "), "{space:?}");
+        }
     }
 
     #[test]

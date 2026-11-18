@@ -60,11 +60,11 @@ impl<T: Searched, M: Mode> Search<T, M> {
         self.rank(all);
     }
 
-    /// Applies an editing key as [`Palette::press`] does, and ranks again when it changed the line.
+    /// Applies an editing key as [`Palette::press`] does, and ranks again when it changed the line or the mode.
     pub fn press(&mut self, key: KeyEvent, all: &[T]) {
-        let revision = self.palette.field().revision();
+        let before = (self.palette.mode, self.palette.field().revision());
         self.palette.press(key);
-        if self.palette.field().revision() != revision {
+        if (self.palette.mode, self.palette.field().revision()) != before {
             self.rank(all);
         }
     }
@@ -150,6 +150,41 @@ mod tests {
             search.press(KeyEvent::new(code, KeyModifiers::NONE), &TABLES);
         }
         assert_eq!((search.palette.input(), search.shown.first()), ("orders", Some(&Table("orders"))));
+    }
+
+    /// Tables by default, commands after a `>`.
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    enum Finding {
+        #[default]
+        Tables,
+        Commands,
+    }
+
+    impl Mode for Finding {
+        fn switched_by(self, first: char) -> Option<Self> {
+            (self == Self::Tables && first == '>').then_some(Self::Commands)
+        }
+
+        fn takes_commands(self) -> bool {
+            self == Self::Commands
+        }
+    }
+
+    fn stale_after(start: Finding, code: KeyCode) -> Search<Table, Finding> {
+        let mut search = Search::with_palette(Palette::new(start, vec![]), &TABLES);
+        search.shown.clear();
+        search.press(KeyEvent::new(code, KeyModifiers::NONE), &TABLES);
+        search
+    }
+
+    #[test]
+    fn a_key_that_switches_the_mode_ranks_the_list_again() {
+        assert_eq!(stale_after(Finding::Tables, KeyCode::Char('>')).shown, TABLES);
+    }
+
+    #[test]
+    fn a_backspace_that_steps_back_to_the_default_mode_ranks_the_list_again() {
+        assert_eq!(stale_after(Finding::Commands, KeyCode::Backspace).shown, TABLES);
     }
 
     #[test]
