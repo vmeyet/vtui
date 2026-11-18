@@ -1,10 +1,16 @@
 //! The input box: its text and where the cursor sits, in one value so the two cannot drift.
-//! The cursor is a byte offset kept on a character boundary, so an accent or an emoji never splits.
+//! The cursor is a byte offset that steps a whole grapheme cluster at a time, so a letter with its combining accent
+//! or an emoji made of several characters never splits.
 //! A selection runs from an anchor to the cursor; a move or an edit drops it.
 
 use std::fmt;
 use std::ops::Range;
+use unicode_segmentation::UnicodeSegmentation as _;
 use unicode_width::UnicodeWidthChar as _;
+
+mod keys;
+
+pub use keys::adds_a_line;
 
 /// A line of text being typed, or several, with the cursor in it.
 #[derive(Clone, Default)]
@@ -79,7 +85,8 @@ impl Field {
         std::mem::take(&mut self.text)
     }
 
-    fn at_end(&self) -> bool {
+    /// Whether the cursor sits after the last character, where a completion or its ghost applies.
+    pub fn at_end(&self) -> bool {
         self.cursor == self.text.len()
     }
 
@@ -128,18 +135,12 @@ impl Field {
 
     /// Erases the character before the cursor; nothing at the start.
     pub fn backspace(&mut self) {
-        let Some(prev) = self.prev() else { return };
-        self.text.remove(prev);
-        self.cursor = prev;
-        self.changed();
+        self.delete_range(self.prev().unwrap_or(self.cursor)..self.cursor);
     }
 
     /// Erases the character under the cursor; nothing at the end.
     pub fn delete(&mut self) {
-        if !self.at_end() {
-            self.text.remove(self.cursor);
-            self.changed();
-        }
+        self.delete_range(self.cursor..self.next().unwrap_or(self.cursor));
     }
 
     /// Deletes back to the start of the word the cursor follows, the spaces in between included.
@@ -318,11 +319,11 @@ impl Field {
     }
 
     fn prev(&self) -> Option<usize> {
-        self.text[..self.cursor].char_indices().next_back().map(|(i, _)| i)
+        self.text[..self.cursor].grapheme_indices(true).next_back().map(|(i, _)| i)
     }
 
     fn next(&self) -> Option<usize> {
-        self.text[self.cursor..].chars().next().map(|c| self.cursor + c.len_utf8())
+        self.text[self.cursor..].graphemes(true).next().map(|cluster| self.cursor + cluster.len())
     }
 
     fn word_start(&self) -> usize {
@@ -595,6 +596,28 @@ mod tests {
         assert_eq!(shown(&field), "caf|é");
         field.delete();
         assert_eq!(shown(&field), "caf|");
+    }
+
+    #[test]
+    fn a_letter_and_its_combining_accent_move_and_delete_as_one() {
+        let mut field = Field::new("e\u{301}x");
+        field.start();
+        assert_eq!(field.split(), ("", "e\u{301}", "x"));
+        field.right();
+        assert_eq!(shown(&field), "e\u{301}|x");
+        field.backspace();
+        assert_eq!(shown(&field), "|x");
+    }
+
+    #[test]
+    fn an_emoji_of_several_characters_moves_and_deletes_as_one() {
+        let family = "👨\u{200d}👩\u{200d}👧";
+        let mut field = Field::new(format!("a{family}b"));
+        field.left();
+        field.left();
+        assert_eq!(field.split(), ("a", family, "b"));
+        field.delete();
+        assert_eq!(shown(&field), "a|b");
     }
 
     #[test]
